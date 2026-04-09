@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">This accessibility service allows the app to control the device, observe actions, and display overlay screens for device management.</string>
+    <string name="device_admin_description">Device Locker provides enterprise-level device management including:
+• Lock/unlock device
+• Camera control
+• Factory reset protection
+• Location management
+• App restrictions
+• Security policies</string>
+</resources>

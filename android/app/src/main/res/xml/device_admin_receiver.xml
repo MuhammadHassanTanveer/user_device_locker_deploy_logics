@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <!-- Password policies -->
+        <limit-password />
+        <reset-password />
+
+        <!-- Security policies -->
+        <watch-login />
+        <force-lock />
+        <wipe-data />
+        <expire-password />
+        <encrypted-storage />
+        <disable-camera />
+        <disable-keyguard-features />
+
+        <!-- Set global proxy (for enterprise use) -->
+        <set-global-proxy />
+    </uses-policies>
+
+    <!-- Support managed provisioning -->
+    <support-transfer-ownership />
+</device-admin>

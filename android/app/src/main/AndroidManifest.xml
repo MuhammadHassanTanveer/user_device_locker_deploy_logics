@@ -1,0 +1,328 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+    <!-- SMS Permission -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+
+    <!-- Camera Permission -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <!-- Storage Permissions (Android 9 and below) -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+
+    <!-- Storage Permissions (Android 13+) - Granular Media Permissions -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <!-- Overlay Permission - Required to show lock screen overlay over all apps -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- DPC Permissions -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_PASSWORD_COMPLEXITY" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Status Bar Control - For collapsing notification panel -->
+    <uses-permission android:name="android.permission.EXPAND_STATUS_BAR" />
+
+    <!-- WiFi Permissions - For WiFi settings access from lock overlay -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Wallpaper Permission - For changing device wallpaper -->
+    <uses-permission android:name="android.permission.SET_WALLPAPER" />
+    <uses-permission android:name="android.permission.SET_WALLPAPER_HINTS" />
+
+    <!-- Outgoing Call Permission - For intercepting secret dialer codes on all Android versions -->
+    <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+
+    <application
+        android:label="Device Locker"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:testOnly="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Disable Impeller to fix GPU compatibility issues -->
+            <meta-data
+              android:name="io.flutter.embedding.android.EnableImpeller"
+              android:value="false" />
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+
+        <!-- Lock Activity - Full screen lock using Lock Task Mode (Kiosk Mode) -->
+        <activity
+            android:name=".LockActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+            android:lockTaskMode="if_whitelisted"
+            android:screenOrientation="portrait"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:showWhenLocked="true"
+            android:directBootAware="true" />
+
+        <!-- WiFi Settings Activity - Opens WiFi settings from lock overlay -->
+        <activity
+            android:name=".WifiSettingsActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:showWhenLocked="true" />
+
+        <!-- Secret Code Dialog Activity - Shows dialog when secret code is dialed -->
+        <activity
+            android:name=".SecretCodeDialogActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:showWhenLocked="true" />
+
+        <!-- Secret Code Receiver - Listens for *#*#9009#*#* dialed from phone -->
+        <!-- Note: This only works on some devices (Realme, OnePlus, etc.) -->
+        <receiver
+            android:name=".SecretCodeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SECRET_CODE" />
+                <data android:scheme="android_secret_code" android:host="9009" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Outgoing Call Receiver - Universal solution for ALL devices including Samsung -->
+        <!-- This intercepts *#*#9009#*#* when SECRET_CODE broadcast is restricted -->
+        <receiver
+            android:name=".OutgoingCallReceiver"
+            android:exported="true"
+            android:permission="android.permission.PROCESS_OUTGOING_CALLS">
+            <intent-filter android:priority="999">
+                <action android:name="android.intent.action.NEW_OUTGOING_CALL" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Default FCM Notification Channel -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="high_importance_channel" />
+
+        <!-- Custom Firebase Messaging Service - handles FCM messages when app is killed -->
+        <service
+            android:name=".MyFirebaseMessagingService"
+            android:exported="false"
+            android:directBootAware="true"
+            android:stopWithTask="false">
+            <intent-filter android:priority="999">
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Disable Flutter's Firebase Messaging Service - we use our own -->
+        <service
+            android:name="io.flutter.plugins.firebase.messaging.FlutterFirebaseMessagingService"
+            tools:node="remove" />
+
+        <!-- Device Command Service - executes DPM commands in foreground -->
+        <service
+            android:name=".DeviceCommandService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:directBootAware="true" />
+
+        <!-- Lock Overlay Service - shows native lock screen overlay with status bar blocker -->
+        <service
+            android:name=".LockOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:directBootAware="true"
+            android:stopWithTask="false" />
+
+        <!-- Message Overlay Service - shows customer message dialog overlay -->
+        <service
+            android:name=".MessageOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:directBootAware="true"
+            android:stopWithTask="false" />
+
+        <!-- Wallpaper Service - manages device wallpaper changes -->
+        <service
+            android:name=".WallpaperService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:directBootAware="true"
+            android:stopWithTask="false" />
+
+        <!-- Factory Reset Warning Service - shows warning when user attempts factory reset -->
+        <service
+            android:name=".FactoryResetWarningService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:directBootAware="true"
+            android:stopWithTask="false" />
+
+        <!-- Lock Overlay Receiver - handles show/hide overlay broadcasts -->
+        <receiver
+            android:name=".LockOverlayReceiver"
+            android:exported="false"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="com.deploy_logics.user_device_locker.SHOW_OVERLAY" />
+                <action android:name="com.deploy_logics.user_device_locker.HIDE_OVERLAY" />
+                <action android:name="com.deploy_logics.user_device_locker.UNLOCK_DEVICE" />
+                <action android:name="com.deploy_logics.user_device_locker.ENABLE_STATUS_BAR" />
+                <action android:name="com.deploy_logics.user_device_locker.DISABLE_STATUS_BAR" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Persistent FCM Service - keeps app process alive for reliable FCM delivery -->
+        <service
+            android:name=".PersistentFCMService"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false"
+            android:directBootAware="true" />
+
+        <!-- Flutter Overlay Window Service -->
+        <service
+            android:name="flutter.overlay.window.flutter_overlay_window.OverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse" />
+
+        <!-- Device Admin Receiver -->
+        <receiver
+            android:name=".MyDeviceAdminReceiver"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true"
+            android:description="@string/device_admin_description">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin_receiver" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+                <action android:name="android.app.action.DEVICE_ADMIN_DISABLE_REQUESTED" />
+                <action android:name="android.app.action.DEVICE_ADMIN_DISABLED" />
+                <action android:name="android.app.action.PROFILE_PROVISIONING_COMPLETE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Accessibility Service -->
+        <service
+            android:name=".MyAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- FCM Notification Listener - intercepts notifications when onMessageReceived isn't called -->
+        <service
+            android:name=".FCMNotificationListener"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- FCM Wake Up Receiver - ensures FCM service is active after boot/app update -->
+        <receiver
+            android:name=".FCMWakeUpReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Network Change Receiver - syncs pending data when internet becomes available -->
+        <receiver
+            android:name=".NetworkChangeReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.conn.CONNECTIVITY_CHANGE" />
+            </intent-filter>
+        </receiver>
+
+
+        <!-- Provisioning Activity for managed device setup -->
+        <activity-alias
+            android:name=".ProvisioningModeActivity"
+            android:targetActivity=".MainActivity"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <intent-filter>
+                <action android:name="android.app.action.PROVISIONING_SUCCESSFUL"/>
+                <action android:name="android.app.action.GET_PROVISIONING_MODE" />
+                <action android:name="android.app.action.ADMIN_POLICY_COMPLIANCE" />
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+        </activity-alias>
+
+    </application>
+
+    <!-- Required to query activities that can process text -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Query all packages for DPC functionality -->
+        <intent>
+            <action android:name="android.intent.action.MAIN"/>
+        </intent>
+    </queries>
+</manifest>
