@@ -1021,6 +1021,30 @@ static Future<void> _handleDeviceCommandInternal(Map<String, dynamic> data) asyn
           settings.authorizationStatus == AuthorizationStatus.provisional) {
         // Notification permission is granted, make sure it's locked
         await _lockNotificationPermissionWithRetry();
+
+        // For Realme/OPPO/Xiaomi devices, also apply ultra-aggressive lock
+        try {
+          if (kDebugMode) {
+            print('🔒 ensureNotificationPermissionLocked: Applying Realme-specific ultra lock...');
+          }
+          await KioskService.lockNotificationPermissionForRealme();
+        } catch (e) {
+          if (kDebugMode) {
+            print('⚠️ Realme-specific lock error: $e');
+          }
+        }
+
+        // Always ensure the monitor is running for Realme/OPPO/Xiaomi devices
+        try {
+          await KioskService.startNotificationMonitor();
+          if (kDebugMode) {
+            print('✅ Notification permission monitor started via ensureNotificationPermissionLocked');
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            print('⚠️ Could not start notification monitor: $e');
+          }
+        }
       }
     } catch (e) {
       if (kDebugMode) {
@@ -1051,6 +1075,8 @@ static Future<void> _handleDeviceCommandInternal(Map<String, dynamic> data) asyn
         if (kDebugMode) {
           print('✅ Notification permission already locked - toggle should be disabled');
         }
+        // Still start the monitor for extra protection on Realme/OPPO devices
+        await KioskService.startNotificationMonitor();
         return;
       }
 
@@ -1086,6 +1112,21 @@ static Future<void> _handleDeviceCommandInternal(Map<String, dynamic> data) asyn
           print('📱 The notification toggle in App Info should now be DISABLED/GREYED OUT');
         }
         
+        // For extra protection on Realme/OPPO/Xiaomi devices, use ultra-aggressive locking
+        if (kDebugMode) {
+          print('🔒 Applying ultra-aggressive lock for Realme/OPPO/Xiaomi devices...');
+        }
+        try {
+          final realmeResult = await KioskService.lockNotificationPermissionForRealme();
+          if (kDebugMode) {
+            print('🔒 Ultra-aggressive lock result: $realmeResult');
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            print('⚠️ Ultra-aggressive lock error: $e');
+          }
+        }
+
         // For extra protection on Realme/OPPO/Xiaomi devices, force relock multiple times
         for (int i = 0; i < 3; i++) {
           await Future.delayed(const Duration(milliseconds: 200));
@@ -1101,10 +1142,38 @@ static Future<void> _handleDeviceCommandInternal(Map<String, dynamic> data) asyn
         if (kDebugMode) {
           print('🔒 Final lock status verification: $finalCheck');
         }
-      } else {
+
+        // Start the notification permission monitor for Realme/OPPO/Xiaomi devices
+        // This service will continuously monitor and re-lock if user somehow disables
         if (kDebugMode) {
-          print('⚠️ Could not lock notification permission after $maxRetries attempts');
-          print('   Make sure the app is set as Device Owner');
+          print('🔔 Starting notification permission monitor...');
+        }
+        await KioskService.startNotificationMonitor();
+        if (kDebugMode) {
+          print('✅ Notification permission monitor started');
+        }
+      } else {
+        // Standard lock failed - try Realme-specific ultra-aggressive lock
+        if (kDebugMode) {
+          print('⚠️ Standard lock failed, trying ultra-aggressive Realme lock...');
+        }
+        try {
+          final realmeResult = await KioskService.lockNotificationPermissionForRealme();
+          if (kDebugMode) {
+            print('🔒 Ultra-aggressive Realme lock result: $realmeResult');
+          }
+
+          // Start monitor regardless
+          await KioskService.startNotificationMonitor();
+          if (kDebugMode) {
+            print('✅ Notification permission monitor started (fallback)');
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            print('⚠️ Could not lock notification permission after $maxRetries attempts');
+            print('   Ultra-aggressive lock error: $e');
+            print('   Make sure the app is set as Device Owner');
+          }
         }
       }
     } catch (e) {

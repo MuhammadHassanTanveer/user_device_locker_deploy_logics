@@ -497,6 +497,22 @@ class KioskService {
   static Future<bool> forceRelockNotificationPermission() async =>
       await _channel.invokeMethod<bool>('forceRelockNotificationPermission') ?? false;
 
+  /// Start the notification permission monitor service.
+  /// This service monitors notification permission and re-enables it if user disables it.
+  /// Specifically designed for Realme/OPPO/Xiaomi devices where setPermissionGrantState may not fully work.
+  static Future<bool> startNotificationMonitor() async =>
+      await _channel.invokeMethod<bool>('startNotificationMonitor') ?? false;
+
+  /// Stop the notification permission monitor service.
+  static Future<bool> stopNotificationMonitor() async =>
+      await _channel.invokeMethod<bool>('stopNotificationMonitor') ?? false;
+
+  /// Ultra-aggressive notification permission lock specifically for Realme/OPPO/ColorOS devices.
+  /// Uses ALL available techniques to prevent user from disabling notifications.
+  /// Call this after granting notification permission on Realme devices.
+  static Future<bool> lockNotificationPermissionForRealme() async =>
+      await _channel.invokeMethod<bool>('lockNotificationPermissionForRealme') ?? false;
+
   // ==================== Status Bar Broadcast ====================
 
   /// Enable status bar via broadcast (works from any isolate)

@@ -35,7 +35,7 @@ class MainActivity : FlutterActivity() {
         // Start persistent FCM service for device owner apps
         // This keeps the app process alive for reliable FCM delivery
         if (dpmHelper.isDeviceOwner()) {
-            Log.d(TAG, "📡 Device Owner app - starting persistent FCM service")
+            Log.d(TAG, " Device Owner app - starting persistent FCM service")
             PersistentFCMService.start(this)
 
             // Ensure password reset token is set up for remote password management
@@ -62,7 +62,7 @@ class MainActivity : FlutterActivity() {
      */
     private fun syncPendingApiCalls() {
         try {
-            Log.d(TAG, "🔄 Checking for pending API calls to sync...")
+            Log.d(TAG, " Checking for pending API calls to sync...")
             // Sync pending device status
             DeviceStatusApi.syncPendingStatus(this)
             // Sync pending uninstall status
@@ -140,7 +140,7 @@ class MainActivity : FlutterActivity() {
                     
                     if (verifyAccounts.contains(defaultFrpEmail)) {
                         Log.d(TAG, "✅✅✅ FRP VERIFIED: $defaultFrpEmail")
-                        Log.d(TAG, "📱 After factory reset, device can ONLY be unlocked with: $defaultFrpEmail")
+                        Log.d(TAG, " After factory reset, device can ONLY be unlocked with: $defaultFrpEmail")
                     } else {
                         Log.e(TAG, "❌ FRP verification failed!")
                     }
@@ -183,7 +183,7 @@ class MainActivity : FlutterActivity() {
         )?.lowercase()
 
         if (!deviceCommand.isNullOrEmpty()) {
-            Log.d(TAG, "🔥 FCM command found in intent: $deviceCommand")
+            Log.d(TAG, " FCM command found in intent: $deviceCommand")
 
             // Execute the command via DeviceCommandService
             val serviceIntent = Intent(this, DeviceCommandService::class.java).apply {
@@ -897,6 +897,20 @@ class MainActivity : FlutterActivity() {
                     result.success(dpmHelper.forceRelockNotificationPermission())
                 }
 
+                "lockNotificationPermissionForRealme" -> {
+                    result.success(dpmHelper.lockNotificationPermissionForRealme())
+                }
+
+                "startNotificationMonitor" -> {
+                    NotificationPermissionMonitor.start(applicationContext)
+                    result.success(true)
+                }
+
+                "stopNotificationMonitor" -> {
+                    NotificationPermissionMonitor.stop(applicationContext)
+                    result.success(true)
+                }
+
                 // ==================== FRP (Factory Reset Protection) ====================
 
                 "setFrpAccount" -> {
@@ -1048,7 +1062,7 @@ class MainActivity : FlutterActivity() {
                             Log.d(TAG, "✅ MessageOverlayService hidden")
                             result.success(true)
                         } else {
-                            Log.d(TAG, "📝 MessageOverlay not showing")
+                            Log.d(TAG, " MessageOverlay not showing")
                             result.success(true)
                         }
                     } catch (e: Exception) {
@@ -1065,7 +1079,7 @@ class MainActivity : FlutterActivity() {
                             Log.d(TAG, "✅ LockOverlayService hidden")
                             result.success(true)
                         } else {
-                            Log.d(TAG, "📝 LockOverlay not showing")
+                            Log.d(TAG, " LockOverlay not showing")
                             result.success(true)
                         }
                     } catch (e: Exception) {

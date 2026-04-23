@@ -2,6 +2,8 @@ package com.deploy_logics.user_device_locker
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Color
@@ -27,6 +29,9 @@ import android.widget.TextView
 /**
  * Accessibility Service that monitors user navigation to sensitive settings pages
  * like Factory Reset, and displays warning overlays to prevent unauthorized actions.
+ *
+ * Also monitors notification settings to prevent users from disabling notifications
+ * on Realme/OPPO/Xiaomi devices where setPermissionGrantState doesn't fully work.
  */
 class MyAccessibilityService : AccessibilityService() {
 
@@ -34,7 +39,8 @@ class MyAccessibilityService : AccessibilityService() {
         private const val TAG = "MyAccessibilityService"
         private const val PREFS_NAME = "factory_reset_warning_prefs"
         private const val KEY_WARNING_ENABLED = "warning_enabled"
-        
+        private const val KEY_NOTIFICATION_LOCK_ENABLED = "notification_lock_enabled"
+
         // SharedPreferences keys for retailer info
         private const val FLUTTER_PREFS_NAME = "FlutterSharedPreferences"
         private const val RETAILER_NAME_KEY = "flutter.retailer_name"
@@ -56,6 +62,64 @@ class MyAccessibilityService : AccessibilityService() {
             "com.google.android.apps.wellbeing"
         )
         
+        // Keywords for notification settings pages (including Realme/OPPO/ColorOS)
+        private val NOTIFICATION_SETTINGS_KEYWORDS = listOf(
+            "notifications",
+            "notification settings",
+            "app notifications",
+            "show notifications",
+            "allow notifications",
+            "notification access",
+            "all device locker notifications",
+            "device locker",
+            "manage notifications",
+            "notification management",
+            "notification permission",
+            "allow notification",
+            "app notification",
+            "turn on notifications",
+            "turn off notifications",
+            "اطلاعات",
+            "نوٹیفکیشن",
+            // Realme/ColorOS specific
+            "notification & status bar",
+            "notification style",
+            "floating notification",
+            "heads up",
+            "lock screen notification"
+        )
+
+        // Activity/Class names for notification settings (including Realme/OPPO/ColorOS)
+        private val NOTIFICATION_ACTIVITIES = listOf(
+            "AppNotificationSettings",
+            "NotificationSettings",
+            "ChannelNotificationSettings",
+            "NotificationAccessSettings",
+            "AppInfoNotification",
+            "NotificationManagerService",
+            "ConfigureNotification",
+            "NotificationStation",
+            // Realme/OPPO/ColorOS specific
+            "AppNotificationsPreferenceController",
+            "OPlusNotificationSettings",
+            "ColorNotificationSettings",
+            "RealmeNotificationSettings",
+            "InstalledAppDetailsTop",
+            "AppNotificationSettingsActivity",
+            "NotificationMainSettings",
+            "AppNotificationPreference"
+        )
+
+        // Keywords for our app specifically in notification settings
+        private val OUR_APP_KEYWORDS = listOf(
+            "device locker",
+            "dcp_test",
+            "deploy_logics",
+            "user_device_locker",
+            // Also match partial app name
+            "locker"
+        )
+
         // Keywords that indicate factory reset related pages (English and Urdu)
         private val FACTORY_RESET_KEYWORDS = listOf(
             "factory data reset",
@@ -120,6 +184,10 @@ class MyAccessibilityService : AccessibilityService() {
     // Device Policy Manager Helper to check factory reset status
     private var dpmHelper: DevicePolicyManagerHelper? = null
     
+    // DPM for direct access to notification permission locking
+    private var dpm: DevicePolicyManager? = null
+    private var adminComponent: ComponentName? = null
+
     // Overlay state management
     private var overlayView: View? = null
     private var windowManager: WindowManager? = null
@@ -131,6 +199,11 @@ class MyAccessibilityService : AccessibilityService() {
     private var lastOverlayShowTime: Long = 0  // Debounce overlay showing
     private var isOnFactoryResetScreen = false  // Track if we're on factory reset screen
     
+    // Notification settings monitoring
+    private var isOnNotificationSettingsScreen = false
+    private var lastNotificationRelockTime: Long = 0
+    private var notificationRelockCount = 0
+
     // Our own app package - ignore events from this
     private val OWN_PACKAGE = "com.deploy_logics.user_device_locker"
     
@@ -202,6 +275,31 @@ class MyAccessibilityService : AccessibilityService() {
         
         currentSettingsPackage = packageName
         
+        // Get text from window for detection
+        val windowText = getWindowText().lowercase()
+
+        // =====================================================
+        // NOTIFICATION SETTINGS PROTECTION - CHECK FIRST
+        // This is critical for Realme/OPPO/Xiaomi devices
+        // =====================================================
+        if (isOurAppNotificationSettings(className, windowText)) {
+            Log.d(TAG, "🔔 Detected OUR APP's notification settings page!")
+            isOnNotificationSettingsScreen = true
+
+            // Immediately re-lock notification permission
+            relockNotificationPermissionAggressive()
+
+            // Try to find and disable the notification toggle switch
+            disableNotificationToggle()
+        } else if (isOnNotificationSettingsScreen) {
+            // Left notification settings, reset state
+            isOnNotificationSettingsScreen = false
+        }
+
+        // =====================================================
+        // FACTORY RESET PROTECTION
+        // =====================================================
+
         // If overlay is already showing or pending, don't process further - prevents blinking
         if (isOverlayShowing || isOverlayPending) {
             return
@@ -221,9 +319,6 @@ class MyAccessibilityService : AccessibilityService() {
                 return // Skip content changes for 10 seconds after detection
             }
         }
-        
-        // Get text from window
-        val windowText = getWindowText().lowercase()
         
         // Check if this is a factory reset related page
         if (isFactoryResetRelated(className, windowText)) {
@@ -329,6 +424,282 @@ class MyAccessibilityService : AccessibilityService() {
         }
         
         return false
+    }
+
+    /**
+     * Check if we're on our app's notification settings page.
+     * This detects when user navigates to App Info > Notifications for our app.
+     * Enhanced for Realme/OPPO/ColorOS/RealmeUI devices.
+     */
+    private fun isOurAppNotificationSettings(className: String, windowText: String): Boolean {
+        val classNameLower = className.lowercase()
+        val textLower = windowText.lowercase()
+
+        // Check if we're in a notification settings activity
+        val isNotificationActivity = NOTIFICATION_ACTIVITIES.any {
+            classNameLower.contains(it.lowercase())
+        }
+
+        // Check if text contains notification-related keywords
+        val hasNotificationKeywords = NOTIFICATION_SETTINGS_KEYWORDS.any {
+            textLower.contains(it.lowercase())
+        }
+
+        // Check if this is specifically about our app
+        val isOurApp = OUR_APP_KEYWORDS.any {
+            textLower.contains(it.lowercase())
+        }
+
+        // Realme/OPPO specific: Check for their unique patterns
+        val isRealmeNotificationPage = classNameLower.contains("installedappdetails") ||
+                                       classNameLower.contains("appdetailsactivity") ||
+                                       classNameLower.contains("appinfodashboard") ||
+                                       classNameLower.contains("colorpermission") ||
+                                       classNameLower.contains("opponotification")
+
+        // Check for notification toggle text patterns
+        val hasNotificationToggle = textLower.contains("allow notification") ||
+                                    textLower.contains("show notification") ||
+                                    textLower.contains("all notifications") ||
+                                    textLower.contains("notification dot") ||
+                                    textLower.contains("sound & vibration") ||
+                                    textLower.contains("notification categories") ||
+                                    textLower.contains("pop-up notification") ||
+                                    textLower.contains("lock screen") && textLower.contains("notification")
+
+        // Debug logging
+        if (isNotificationActivity || hasNotificationKeywords || isRealmeNotificationPage) {
+            Log.d(TAG, "🔔 Notification screen check - Activity: $isNotificationActivity, Keywords: $hasNotificationKeywords, OurApp: $isOurApp, Realme: $isRealmeNotificationPage")
+            Log.d(TAG, "   ClassName: $className")
+            Log.d(TAG, "   WindowText contains 'device locker': ${textLower.contains("device locker")}")
+            Log.d(TAG, "   HasNotificationToggle: $hasNotificationToggle")
+        }
+
+        // Return true if this is a notification settings page for our app
+        // We check for notification activity/keywords AND our app name
+        // OR if it's just "app notifications" page which lists all apps
+        if (isNotificationActivity && isOurApp) {
+            return true
+        }
+
+        if (hasNotificationKeywords && isOurApp) {
+            return true
+        }
+
+        // Realme/OPPO: If we're on app details with notification toggle visible
+        if (isRealmeNotificationPage && isOurApp && hasNotificationToggle) {
+            return true
+        }
+
+        // Also detect generic notification settings that might show toggle for our app
+        if (classNameLower.contains("appnotification") ||
+            classNameLower.contains("notificationsetting")) {
+            // Check if our app name is visible
+            if (textLower.contains("device locker")) {
+                return true
+            }
+        }
+
+        // For Realme: Also detect when we're in App Info and notification section is visible
+        if (isOurApp && (classNameLower.contains("appinfo") || classNameLower.contains("appdetail"))) {
+            if (hasNotificationToggle || textLower.contains("notification")) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    /**
+     * Aggressively re-lock notification permission.
+     * Called when user navigates to our app's notification settings.
+     * This ensures the permission stays granted even on Realme/OPPO/Xiaomi devices.
+     */
+    private fun relockNotificationPermissionAggressive() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return // Only needed for Android 13+
+        }
+
+        val now = System.currentTimeMillis()
+
+        // Debounce - don't relock too frequently
+        if (now - lastNotificationRelockTime < 500) {
+            return
+        }
+        lastNotificationRelockTime = now
+
+        try {
+            if (dpm == null || adminComponent == null) {
+                Log.w(TAG, "DPM not initialized, cannot relock notification permission")
+                return
+            }
+
+            // Check if we're device owner
+            if (dpm?.isDeviceOwnerApp(packageName) != true) {
+                Log.d(TAG, "Not device owner, cannot relock notification permission")
+                return
+            }
+
+            Log.d(TAG, "🔒 Aggressively re-locking notification permission...")
+
+            // Multiple attempts to ensure it sticks
+            for (i in 1..5) {
+                val result = dpm?.setPermissionGrantState(
+                    adminComponent!!,
+                    packageName,
+                    android.Manifest.permission.POST_NOTIFICATIONS,
+                    DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
+                ) ?: false
+
+                Log.d(TAG, "   Attempt $i: $result")
+
+                if (result) {
+                    notificationRelockCount++
+                }
+
+                Thread.sleep(30)
+            }
+
+            Log.d(TAG, "✅ Notification permission re-locked (total: $notificationRelockCount times)")
+
+            // Also use the helper for additional protection methods
+            dpmHelper?.forceRelockNotificationPermission()
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error re-locking notification permission: ${e.message}")
+        }
+    }
+
+    /**
+     * Try to find and disable/hide the notification toggle switch.
+     * Uses accessibility actions to interact with the switch if found.
+     */
+    private fun disableNotificationToggle() {
+        try {
+            val rootNode = rootInActiveWindow ?: return
+
+            // Find switches/toggles in the current window
+            findAndDisableSwitch(rootNode)
+
+            rootNode.recycle()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error finding notification toggle: ${e.message}")
+        }
+    }
+
+    /**
+     * Recursively search for switch/toggle nodes and try to disable interaction.
+     * Enhanced for Realme/OPPO/ColorOS devices which use different UI components.
+     */
+    private fun findAndDisableSwitch(node: AccessibilityNodeInfo?, depth: Int = 0) {
+        if (node == null || depth > 15) return
+
+        try {
+            val className = node.className?.toString() ?: ""
+            val text = node.text?.toString()?.lowercase() ?: ""
+            val contentDesc = node.contentDescription?.toString()?.lowercase() ?: ""
+            val viewId = node.viewIdResourceName?.toString()?.lowercase() ?: ""
+
+            // Look for switches, toggles, checkboxes (including Realme-specific components)
+            val isSwitchLike = className.contains("Switch") ||
+                               className.contains("Toggle") ||
+                               className.contains("CheckBox") ||
+                               className.contains("CompoundButton") ||
+                               className.contains("SwitchCompat") ||
+                               // Realme/OPPO specific components
+                               className.contains("ColorSwitch") ||
+                               className.contains("OppoSwitch") ||
+                               className.contains("OPlusSwitch") ||
+                               viewId.contains("switch") ||
+                               viewId.contains("toggle")
+
+            // Check if this switch is related to notifications (expanded patterns)
+            val isNotificationRelated = text.contains("notification") ||
+                                        contentDesc.contains("notification") ||
+                                        text.contains("all device locker") ||
+                                        contentDesc.contains("all device locker") ||
+                                        text.contains("allow") ||
+                                        contentDesc.contains("allow") ||
+                                        // Realme specific
+                                        viewId.contains("notification") ||
+                                        viewId.contains("permission_switch") ||
+                                        viewId.contains("app_notification") ||
+                                        // General patterns
+                                        text.isEmpty() // Sometimes the main switch has no text
+
+            // For Realme: Also check parent context for notification keyword
+            var parentHasNotificationContext = false
+            try {
+                val parent = node.parent
+                if (parent != null) {
+                    val parentText = parent.text?.toString()?.lowercase() ?: ""
+                    val parentDesc = parent.contentDescription?.toString()?.lowercase() ?: ""
+                    parentHasNotificationContext = parentText.contains("notification") ||
+                                                   parentDesc.contains("notification")
+                    parent.recycle()
+                }
+            } catch (e: Exception) {
+                // Ignore
+            }
+
+            if (isSwitchLike && (isNotificationRelated || parentHasNotificationContext)) {
+                Log.d(TAG, "🎯 Found notification toggle: $className, checked=${node.isChecked}, viewId=$viewId")
+
+                // If the switch is OFF (unchecked), try to turn it ON
+                if (!node.isChecked && node.isEnabled) {
+                    Log.d(TAG, "   Toggle is OFF, attempting to turn ON...")
+
+                    // Method 1: Direct click
+                    if (node.isClickable) {
+                        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        Log.d(TAG, "   ✅ Clicked toggle to turn ON (Method 1)")
+                    }
+
+                    // Method 2: Try clicking parent if node itself isn't clickable
+                    try {
+                        val clickableParent = node.parent
+                        if (clickableParent != null && clickableParent.isClickable) {
+                            clickableParent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            Log.d(TAG, "   ✅ Clicked parent to turn ON (Method 2)")
+                            clickableParent.recycle()
+                        }
+                    } catch (e: Exception) {
+                        // Ignore
+                    }
+
+                    // Method 3: Focus and then click
+                    try {
+                        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                        Thread.sleep(50)
+                        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        Log.d(TAG, "   ✅ Focus+click (Method 3)")
+                    } catch (e: Exception) {
+                        // Ignore
+                    }
+                } else if (node.isChecked) {
+                    Log.d(TAG, "   ✓ Toggle is already ON")
+                }
+
+                // After ensuring it's ON, re-lock the permission immediately
+                relockNotificationPermissionAggressive()
+
+                // Small delay then re-lock again for Realme
+                mainHandler.postDelayed({
+                    relockNotificationPermissionAggressive()
+                }, 200)
+            }
+
+            // Recursively check children
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i)
+                if (child != null) {
+                    findAndDisableSwitch(child, depth + 1)
+                    child.recycle()
+                }
+            }
+        } catch (e: Exception) {
+            // Ignore errors in recursion
+        }
     }
 
     /**
@@ -625,14 +996,21 @@ class MyAccessibilityService : AccessibilityService() {
         // Initialize DevicePolicyManagerHelper to check factory reset status
         dpmHelper = DevicePolicyManagerHelper(this)
         
+        // Initialize DPM for direct notification permission control
+        dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        adminComponent = ComponentName(this, MyDeviceAdminReceiver::class.java)
+
         // Reset all state flags on service connect/reconnect
         // This ensures overlay will show when factory reset is detected
         isOverlayShowing = false
         isOverlayPending = false
         wasOverlayDismissedByUser = false
         isOnFactoryResetScreen = false
+        isOnNotificationSettingsScreen = false
         lastFactoryResetDetectedTime = 0
         lastOverlayShowTime = 0
+        lastNotificationRelockTime = 0
+        notificationRelockCount = 0
         currentSettingsPackage = null
         overlayView = null
         
@@ -649,7 +1027,7 @@ class MyAccessibilityService : AccessibilityService() {
         }
         
         serviceInfo = info
-        Log.d(TAG, "✅ Service configured with fresh state")
+        Log.d(TAG, "✅ Service configured with fresh state (notification lock enabled)")
     }
 
     override fun onDestroy() {

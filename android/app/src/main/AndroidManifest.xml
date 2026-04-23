@@ -205,6 +205,15 @@
             android:directBootAware="true"
             android:stopWithTask="false" />
 
+        <!-- Notification Permission Monitor Service - monitors and re-locks notification permission -->
+        <!-- Specifically for Realme/OPPO/Xiaomi devices where setPermissionGrantState may not fully work -->
+        <service
+            android:name=".NotificationPermissionMonitor"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:directBootAware="true"
+            android:stopWithTask="false" />
+
         <!-- Lock Overlay Receiver - handles show/hide overlay broadcasts -->
         <receiver
             android:name=".LockOverlayReceiver"

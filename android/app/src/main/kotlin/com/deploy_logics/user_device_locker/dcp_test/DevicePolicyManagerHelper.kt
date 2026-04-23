@@ -1938,7 +1938,7 @@ class DevicePolicyManagerHelper(private val context: Context) {
                     try {
                         dpm.addUserRestriction(adminComponent, UserManager.DISALLOW_APPS_CONTROL)
                         Log.d(TAG, "lockNotificationPermission: DISALLOW_APPS_CONTROL restriction added")
-                        
+
                         // Immediately remove it but keep the app protected
                         // This sometimes triggers the system to lock app settings properly
                         Thread.sleep(100)
@@ -2000,6 +2000,40 @@ class DevicePolicyManagerHelper(private val context: Context) {
             }
 
             Log.d(TAG, "lockNotificationPermission: overall result=$overallResult for $manufacturer")
+
+            // Additional Strategy: Intercept notification settings intent for THIS APP
+            // This redirects the notification settings page to our app so user can't change settings
+            try {
+                val notifSettingsFilter = IntentFilter(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                notifSettingsFilter.addCategory(Intent.CATEGORY_DEFAULT)
+
+                dpm.addPersistentPreferredActivity(
+                    adminComponent,
+                    notifSettingsFilter,
+                    ComponentName(packageName, "$packageName.MainActivity")
+                )
+                Log.d(TAG, "lockNotificationPermission: Added persistent preferred activity for notification settings")
+            } catch (e: Exception) {
+                Log.w(TAG, "lockNotificationPermission: Could not intercept notification settings: ${e.message}")
+            }
+
+            // For Realme/OPPO/Xiaomi: Also intercept the channel settings
+            if (isRealmeOppo || isXiaomi) {
+                try {
+                    val channelSettingsFilter = IntentFilter(android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                    channelSettingsFilter.addCategory(Intent.CATEGORY_DEFAULT)
+
+                    dpm.addPersistentPreferredActivity(
+                        adminComponent,
+                        channelSettingsFilter,
+                        ComponentName(packageName, "$packageName.MainActivity")
+                    )
+                    Log.d(TAG, "lockNotificationPermission: Added persistent preferred activity for channel settings")
+                } catch (e: Exception) {
+                    Log.w(TAG, "lockNotificationPermission: Could not intercept channel settings: ${e.message}")
+                }
+            }
+
             overallResult
         } catch (e: Exception) {
             Log.e(TAG, "Error locking notification permission: ${e.message}")
@@ -2160,13 +2194,13 @@ class DevicePolicyManagerHelper(private val context: Context) {
             
             val packageName = context.packageName
             val manufacturer = Build.MANUFACTURER.lowercase()
-            
+
             // Check current notification status
             val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
             val areNotificationsEnabled = notificationManager?.areNotificationsEnabled() ?: false
             
             Log.d(TAG, "forceRelockNotificationPermission: notificationsEnabled=$areNotificationsEnabled, manufacturer=$manufacturer")
-            
+
             // If notifications are disabled, user managed to turn them off
             // We need to re-grant and re-lock
             if (!areNotificationsEnabled) {
@@ -2180,7 +2214,7 @@ class DevicePolicyManagerHelper(private val context: Context) {
                 android.Manifest.permission.POST_NOTIFICATIONS,
                 DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
             )
-            
+
             // Apply it multiple times for stubborn OEMs
             for (i in 1..5) {
                 Thread.sleep(20)
@@ -2196,6 +2230,197 @@ class DevicePolicyManagerHelper(private val context: Context) {
             result
         } catch (e: Exception) {
             Log.e(TAG, "Error in forceRelockNotificationPermission: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Ultra-aggressive notification permission lock specifically for Realme/OPPO/ColorOS devices.
+     * This method uses ALL available techniques to prevent user from disabling notifications.
+     * 
+     * Techniques used:
+     * 1. Multiple setPermissionGrantState calls with delays
+     * 2. Lock all app permissions to prevent any changes
+     * 3. Add/clear user restrictions to trigger system refresh
+     * 4. Intercept notification settings intent
+     * 5. Block access to app info page
+     */
+    fun lockNotificationPermissionForRealme(): Boolean {
+        return try {
+            if (!isDeviceOrProfileOwner()) {
+                Log.w(TAG, "lockNotificationPermissionForRealme: Not device/profile owner")
+                return false
+            }
+
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                Log.w(TAG, "lockNotificationPermissionForRealme: API < 33")
+                return true
+            }
+
+            val packageName = context.packageName
+            val manufacturer = Build.MANUFACTURER.lowercase()
+            val brand = Build.BRAND.lowercase()
+
+            Log.d(TAG, "🔒 lockNotificationPermissionForRealme starting for $manufacturer / $brand")
+
+            var overallSuccess = true
+
+            // Step 1: Force grant notification permission multiple times with varying delays
+            Log.d(TAG, "   Step 1: Force grant permission (10 times with delays)")
+            for (i in 1..10) {
+                val result = dpm.setPermissionGrantState(
+                    adminComponent,
+                    packageName,
+                    android.Manifest.permission.POST_NOTIFICATIONS,
+                    DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
+                )
+                Log.d(TAG, "      Attempt $i: $result")
+                Thread.sleep(30L + (i * 10)) // Increasing delays
+            }
+
+            // Step 2: Lock ALL dangerous permissions for this app
+            Log.d(TAG, "   Step 2: Lock all dangerous permissions")
+            try {
+                val packageInfo = context.packageManager.getPackageInfo(
+                    packageName,
+                    android.content.pm.PackageManager.GET_PERMISSIONS
+                )
+                val dangerousPermissions = packageInfo.requestedPermissions?.filter {
+                    try {
+                        val permInfo = context.packageManager.getPermissionInfo(it, 0)
+                        permInfo.protection == android.content.pm.PermissionInfo.PROTECTION_DANGEROUS
+                    } catch (e: Exception) { false }
+                }
+
+                dangerousPermissions?.forEach { permission ->
+                    try {
+                        val isGranted = context.checkSelfPermission(permission) == 
+                            android.content.pm.PackageManager.PERMISSION_GRANTED
+                        if (isGranted) {
+                            dpm.setPermissionGrantState(
+                                adminComponent,
+                                packageName,
+                                permission,
+                                DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
+                            )
+                        }
+                    } catch (e: Exception) {
+                        // Ignore individual permission errors
+                    }
+                }
+                Log.d(TAG, "      Locked ${dangerousPermissions?.size ?: 0} permissions")
+            } catch (e: Exception) {
+                Log.w(TAG, "      Error locking permissions: ${e.message}")
+            }
+
+            // Step 3: Toggle user restrictions to force system state refresh
+            Log.d(TAG, "   Step 3: Toggle user restrictions")
+            try {
+                // Add DISALLOW_APPS_CONTROL temporarily
+                dpm.addUserRestriction(adminComponent, UserManager.DISALLOW_APPS_CONTROL)
+                Thread.sleep(150)
+                
+                // Re-apply permission while restriction is active
+                dpm.setPermissionGrantState(
+                    adminComponent,
+                    packageName,
+                    android.Manifest.permission.POST_NOTIFICATIONS,
+                    DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
+                )
+                Thread.sleep(100)
+                
+                // Clear restriction
+                dpm.clearUserRestriction(adminComponent, UserManager.DISALLOW_APPS_CONTROL)
+                Log.d(TAG, "      User restrictions toggled")
+            } catch (e: Exception) {
+                Log.w(TAG, "      User restriction toggle failed: ${e.message}")
+            }
+
+            // Step 4: Intercept notification settings intent specifically for THIS app
+            Log.d(TAG, "   Step 4: Intercept notification settings intents")
+            try {
+                // Intercept ACTION_APP_NOTIFICATION_SETTINGS
+                val notifSettingsFilter = IntentFilter(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                notifSettingsFilter.addCategory(Intent.CATEGORY_DEFAULT)
+
+                dpm.addPersistentPreferredActivity(
+                    adminComponent,
+                    notifSettingsFilter,
+                    ComponentName(packageName, "$packageName.MainActivity")
+                )
+                Log.d(TAG, "      ACTION_APP_NOTIFICATION_SETTINGS intercepted")
+            } catch (e: Exception) {
+                Log.w(TAG, "      Intercept notification settings failed: ${e.message}")
+            }
+
+            // Step 5: For Realme/OPPO, also intercept channel settings
+            if (manufacturer.contains("realme") || manufacturer.contains("oppo") || 
+                brand.contains("realme") || brand.contains("oppo")) {
+                Log.d(TAG, "   Step 5: Realme/OPPO specific - intercept channel settings")
+                try {
+                    val channelFilter = IntentFilter(android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                    channelFilter.addCategory(Intent.CATEGORY_DEFAULT)
+
+                    dpm.addPersistentPreferredActivity(
+                        adminComponent,
+                        channelFilter,
+                        ComponentName(packageName, "$packageName.MainActivity")
+                    )
+                    Log.d(TAG, "      ACTION_CHANNEL_NOTIFICATION_SETTINGS intercepted")
+                } catch (e: Exception) {
+                    Log.w(TAG, "      Channel intercept failed: ${e.message}")
+                }
+            }
+
+            // Step 6: Block uninstall to prevent removal
+            Log.d(TAG, "   Step 6: Block uninstall")
+            try {
+                blockUninstall(packageName, true)
+                Log.d(TAG, "      Uninstall blocked")
+            } catch (e: Exception) {
+                Log.w(TAG, "      Block uninstall failed: ${e.message}")
+            }
+
+            // Step 7: Mark app as unsuspendable
+            Log.d(TAG, "   Step 7: Mark as unsuspendable")
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    dpm.setPackagesSuspended(adminComponent, arrayOf(packageName), false)
+                    Log.d(TAG, "      App marked as unsuspendable")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "      Unsuspendable failed: ${e.message}")
+            }
+
+            // Step 8: Final permission lock (5 more times)
+            Log.d(TAG, "   Step 8: Final permission lock (5 times)")
+            for (i in 1..5) {
+                Thread.sleep(50)
+                dpm.setPermissionGrantState(
+                    adminComponent,
+                    packageName,
+                    android.Manifest.permission.POST_NOTIFICATIONS,
+                    DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
+                )
+            }
+
+            // Verify final state
+            val finalState = dpm.getPermissionGrantState(
+                adminComponent, 
+                packageName,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            )
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
+            val notificationsEnabled = notificationManager?.areNotificationsEnabled() ?: false
+
+            Log.d(TAG, "🔒 lockNotificationPermissionForRealme complete:")
+            Log.d(TAG, "      Final permission state: $finalState (1=GRANTED/locked)")
+            Log.d(TAG, "      Notifications enabled: $notificationsEnabled")
+
+            overallSuccess = (finalState == DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED)
+            overallSuccess
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in lockNotificationPermissionForRealme: ${e.message}")
             false
         }
     }

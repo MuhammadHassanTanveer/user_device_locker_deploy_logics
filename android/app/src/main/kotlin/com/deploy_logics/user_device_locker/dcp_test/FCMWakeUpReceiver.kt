@@ -19,7 +19,7 @@ class FCMWakeUpReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         Log.d(TAG, "===========================================")
-        Log.d(TAG, "📡 FCMWakeUpReceiver.onReceive() - action: ${intent.action}")
+        Log.d(TAG, " FCMWakeUpReceiver.onReceive() - action: ${intent.action}")
         Log.d(TAG, "===========================================")
 
         when (intent.action) {
@@ -27,7 +27,7 @@ class FCMWakeUpReceiver : BroadcastReceiver() {
             Intent.ACTION_LOCKED_BOOT_COMPLETED,
             "android.intent.action.QUICKBOOT_POWERON",
             "com.htc.intent.action.QUICKBOOT_POWERON" -> {
-                Log.d(TAG, "📱 Device booted - ensuring FCM is active")
+                Log.d(TAG, " Device booted - ensuring FCM is active")
                 ensureFCMActive(context)
                 startPersistentServiceIfDeviceOwner(context)
                 // Register network callback for pending sync
@@ -36,7 +36,7 @@ class FCMWakeUpReceiver : BroadcastReceiver() {
                 syncPendingData(context)
             }
             Intent.ACTION_MY_PACKAGE_REPLACED -> {
-                Log.d(TAG, "📱 App updated - ensuring FCM is active")
+                Log.d(TAG, " App updated - ensuring FCM is active")
                 ensureFCMActive(context)
                 startPersistentServiceIfDeviceOwner(context)
                 // Register network callback for pending sync
@@ -45,14 +45,14 @@ class FCMWakeUpReceiver : BroadcastReceiver() {
                 syncPendingData(context)
             }
             else -> {
-                Log.d(TAG, "📡 Other action received: ${intent.action}")
+                Log.d(TAG, " Other action received: ${intent.action}")
             }
         }
     }
 
     private fun syncPendingData(context: Context) {
         try {
-            Log.d(TAG, "🔄 Checking for pending data to sync...")
+            Log.d(TAG, " Checking for pending data to sync...")
             // Sync pending device status
             DeviceStatusApi.syncPendingStatus(context)
             // Sync pending uninstall status
@@ -82,14 +82,47 @@ class FCMWakeUpReceiver : BroadcastReceiver() {
         try {
             val dpmHelper = DevicePolicyManagerHelper(context)
             if (dpmHelper.isDeviceOwner()) {
-                Log.d(TAG, "📡 Device Owner app - starting persistent FCM service")
+                Log.d(TAG, " Device Owner app - starting persistent FCM service")
                 PersistentFCMService.start(context)
                 
                 // IMPORTANT: Ensure FRP is set on every boot
                 ensureFrpSetup(context, dpmHelper)
+                
+                // IMPORTANT: Start notification permission monitor on boot
+                // This ensures notification permission stays locked on Realme/OPPO/Xiaomi devices
+                startNotificationPermissionMonitor(context, dpmHelper)
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error starting persistent service: ${e.message}")
+        }
+    }
+    
+    /**
+     * Start notification permission monitor on boot.
+     * This ensures notification permission is re-locked on every boot for Realme/OPPO/Xiaomi devices.
+     */
+    private fun startNotificationPermissionMonitor(context: Context, dpmHelper: DevicePolicyManagerHelper) {
+        try {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            val areNotificationsEnabled = notificationManager.areNotificationsEnabled()
+            
+            if (areNotificationsEnabled) {
+                Log.d(TAG, " Notifications enabled - re-locking permission on boot")
+                
+                // Re-lock notification permission
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val lockResult = dpmHelper.lockNotificationPermission()
+                    Log.d(TAG, " Notification permission re-locked on boot: $lockResult")
+                }
+                
+                // Start the monitor service
+                NotificationPermissionMonitor.start(context)
+                Log.d(TAG, "✅ Notification permission monitor started on boot")
+            } else {
+                Log.w(TAG, "⚠️ Notifications not enabled - skipping monitor on boot")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting notification permission monitor on boot: ${e.message}")
         }
     }
     
