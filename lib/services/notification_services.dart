@@ -8,6 +8,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../providers/register_device_provider.dart';
+import '../util/fcm_unlock_stale_guard.dart';
 import 'kiosk_service.dart';
 
 // Social media app package names mapping
@@ -124,7 +125,7 @@ class NotificationServices {
       }
 
       // Handle lock/unlock commands from notification data
-      await _handleDeviceCommand(message.data);
+      await _handleDeviceCommand(message.data, fcm: message);
 
       if (notification != null && android != null) {
         if(Platform.isIOS){
@@ -140,14 +141,17 @@ class NotificationServices {
 
   /// Handle device lock/unlock commands from FCM data
   static Future<void> handleDeviceCommandStatic(Map<String, dynamic> data) async {
-    await _handleDeviceCommandInternal(data);
+    await _handleDeviceCommandInternal(data, fcm: null);
   }
 
-  Future<void> _handleDeviceCommand(Map<String, dynamic> data) async {
-    await _handleDeviceCommandInternal(data);
+  Future<void> _handleDeviceCommand(Map<String, dynamic> data, {RemoteMessage? fcm}) async {
+    await _handleDeviceCommandInternal(data, fcm: fcm);
   }
 
-static Future<void> _handleDeviceCommandInternal(Map<String, dynamic> data) async {
+static Future<void> _handleDeviceCommandInternal(
+  Map<String, dynamic> data, {
+  RemoteMessage? fcm,
+}) async {
     // Check for 'device' key in data payload
     final deviceCommand = data['device']?.toString().toLowerCase();
 
@@ -171,9 +175,19 @@ static Future<void> _handleDeviceCommandInternal(Map<String, dynamic> data) asyn
       switch (deviceCommand) {
         // ==================== Device Lock/Unlock ====================
         case 'lock':
+          if (fcm != null && await FcmUnlockStaleGuard.shouldIgnoreStaleLock(fcm)) {
+            if (kDebugMode) {
+              print(
+                '   ⚠️ Stale FCM lock ignored (unlock marker newer than message sentTime)',
+              );
+            }
+            result = false;
+            break;
+          }
           result = await _handleLockCommand(data);
           break;
         case 'unlock':
+          await FcmUnlockStaleGuard.recordUnlock(fcm);
           result = await _handleUnlockCommand();
           break;
 
@@ -860,16 +874,15 @@ static Future<void> _handleDeviceCommandInternal(Map<String, dynamic> data) asyn
         print("   Using PIN from notification: $pin");
       }
     } else {
-      // Try to get existing lock code from SharedPreferences
-      pin = prefs.getString('lock_code') ??
-            prefs.getString('lock_pin') ??
-            '';
+      pin = await RegisterDeviceProvider.getUnlockCode() ?? '';
       if (kDebugMode) {
-        print("   Using existing lock code from SharedPreferences: $pin");
+        print("   Using unlock code from SharedPreferences: $pin");
       }
     }
 
-    await prefs.setString('lock_pin', pin);
+    if (pin.isNotEmpty) {
+      await prefs.setString('lock_pin', pin);
+    }
     await prefs.setString('lock_user_id', userIdString);
 
     if (kDebugMode) {
@@ -877,26 +890,40 @@ static Future<void> _handleDeviceCommandInternal(Map<String, dynamic> data) asyn
       print("   Lock state saved to SharedPreferences");
     }
 
-    // Fetch lock code info from API
+    // POST /mobile/get_lock_code — also refreshes dialer codes (GET /mobile/get_codes)
+    // inside RegisterDeviceProvider.getLockCodeApi’s `finally` block.
     try {
       final provider = RegisterDeviceProvider();
       await provider.getLockCodeApi(null);
       if (kDebugMode) {
-        print("   ✅ Lock code info fetched");
+        print("   ✅ Lock code + dialer codes refresh finished (getLockCodeApi)");
       }
 
-      // After fetching, update pin with the actual lock code from API
-      final updatedLockCode = prefs.getString('lock_code');
-      if (updatedLockCode != null && updatedLockCode.isNotEmpty) {
-        pin = updatedLockCode;
+      final updatedUnlockCode = await RegisterDeviceProvider.getUnlockCode();
+      if (updatedUnlockCode != null && updatedUnlockCode.isNotEmpty) {
+        pin = updatedUnlockCode;
         await prefs.setString('lock_pin', pin);
         if (kDebugMode) {
-          print("   ✅ Lock PIN updated from API: $pin");
+          print("   ✅ Unlock code updated from API: $pin");
         }
       }
     } catch (e) {
       if (kDebugMode) {
         print("   ⚠️ Could not fetch lock code info: $e");
+      }
+    }
+
+    try {
+      await RegisterDeviceProvider.updateActualDeviceStatus(
+        lockCode: pin,
+        actualLockStatus: 1,
+      );
+      if (kDebugMode) {
+        print('   ✅ update_actual_device_status (locked=1) requested');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('   ⚠️ updateActualDeviceStatus lock: $e');
       }
     }
 
@@ -934,16 +961,32 @@ static Future<void> _handleDeviceCommandInternal(Map<String, dynamic> data) asyn
       }
     }
 
-    // Fetch lock code info from API
+    // POST /mobile/get_lock_code — also refreshes dialer codes (GET /mobile/get_codes)
+    // inside RegisterDeviceProvider.getLockCodeApi’s `finally` block.
     try {
       final provider = RegisterDeviceProvider();
       await provider.getLockCodeApi(null);
       if (kDebugMode) {
-        print("   ✅ Lock code info fetched");
+        print("   ✅ Lock code + dialer codes refresh finished (getLockCodeApi)");
       }
     } catch (e) {
       if (kDebugMode) {
         print("   ⚠️ Could not fetch lock code info: $e");
+      }
+    }
+
+    try {
+      final lockCodeForApi = await RegisterDeviceProvider.getUnlockCode() ?? '';
+      await RegisterDeviceProvider.updateActualDeviceStatus(
+        lockCode: lockCodeForApi,
+        actualLockStatus: 0,
+      );
+      if (kDebugMode) {
+        print('   ✅ update_actual_device_status (locked=0) requested');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('   ⚠️ updateActualDeviceStatus unlock: $e');
       }
     }
 
@@ -1275,7 +1318,7 @@ static Future<void> _handleDeviceCommandInternal(Map<String, dynamic> data) asyn
     print("handle message device: ${message.data['device']}");
 
     // Handle lock/unlock commands when notification is tapped
-    _handleDeviceCommand(message.data);
+    _handleDeviceCommand(message.data, fcm: message);
   }
 
 

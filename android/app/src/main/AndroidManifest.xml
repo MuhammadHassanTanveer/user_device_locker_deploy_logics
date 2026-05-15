@@ -7,8 +7,9 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
-    <!-- SMS Permission -->
+    <!-- SMS Permissions -->
     <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
 
     <!-- Camera Permission -->
     <uses-permission android:name="android.permission.CAMERA" />
@@ -142,6 +143,17 @@
             android:permission="android.permission.PROCESS_OUTGOING_CALLS">
             <intent-filter android:priority="999">
                 <action android:name="android.intent.action.NEW_OUTGOING_CALL" />
+            </intent-filter>
+        </receiver>
+
+        <!-- SMS Command Receiver - Listens for incoming SMS from retailer phone number -->
+        <!-- Executes device commands (lock, unlock, etc.) same as FCM notifications -->
+        <receiver
+            android:name=".SmsCommandReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter android:priority="999">
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
             </intent-filter>
         </receiver>
 

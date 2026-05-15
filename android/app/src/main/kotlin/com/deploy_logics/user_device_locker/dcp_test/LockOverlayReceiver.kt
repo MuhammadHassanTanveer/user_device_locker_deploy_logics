@@ -101,9 +101,7 @@ class LockOverlayReceiver : BroadcastReceiver() {
                 // If no PIN provided, get from SharedPreferences
                 if (pin.isEmpty()) {
                     val prefs = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
-                    pin = prefs.getString("flutter.lock_code", null)
-                        ?: prefs.getString("flutter.lock_pin", null)
-                        ?: "1234"
+                    pin = UnlockCodeApi.getStoredUnlockCode(prefs).ifEmpty { "000000" }
                     Log.d(TAG, "Using existing lock code from SharedPreferences: $pin")
                 }
 

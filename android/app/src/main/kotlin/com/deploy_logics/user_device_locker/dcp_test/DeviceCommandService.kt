@@ -45,18 +45,53 @@ class DeviceCommandService : Service() {
         const val EXTRA_DATA = "data"
 
         /**
-         * Execute a device command via the service
+         * Run [command] using the **same routing as FCM**:
+         *
+         * - `lock`, `lock_device`, `unlock`, `unlock_device`, `message_customer_*`
+         *   execute immediately on the main thread ([MyFirebaseMessagingService] uses the direct path too),
+         *   so dial codes behave like push commands (no extra FG service churn for these).
+         * - All other commands use this foreground service (same as FCM for non-priority commands).
          */
         fun executeCommand(context: Context, command: String, data: Map<String, String>? = null) {
             Log.d(TAG, "executeCommand() called - command: $command")
 
+            val cmdRaw = command.trim()
+            val cmdLower = cmdRaw.lowercase()
+            val payload = data ?: emptyMap()
+
+            if (cmdLower == "lock" || cmdLower == "lock_device" ||
+                cmdLower == "unlock" || cmdLower == "unlock_device" ||
+                cmdLower.startsWith("message_customer_")
+            ) {
+                Log.d(TAG, "executeCommand: immediate path (FCM-equivalent) for: $cmdRaw")
+                val app = context.applicationContext
+                Handler(Looper.getMainLooper()).post {
+                    try {
+                        val dpm = DevicePolicyManagerHelper(app)
+                        when {
+                            cmdLower == "lock" || cmdLower == "lock_device" ->
+                                LockCommandActions.lock(app, dpm, payload)
+                            cmdLower == "unlock" || cmdLower == "unlock_device" ->
+                                LockCommandActions.unlock(app, dpm)
+                            cmdLower.startsWith("message_customer_") -> {
+                                val rawMsg = cmdLower.removePrefix("message_customer_")
+                                val formattedMessage = rawMsg.replace('_', ' ')
+                                MessageOverlayService.show(app, formattedMessage)
+                                Log.d(TAG, "✅ MessageOverlayService shown (immediate path)")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ Immediate command failed: ${e.message}", e)
+                    }
+                }
+                return
+            }
+
             val intent = Intent(context, DeviceCommandService::class.java).apply {
                 action = ACTION_EXECUTE_COMMAND
-                putExtra(EXTRA_COMMAND, command)
-                data?.let {
-                    for ((key, value) in it) {
-                        putExtra(key, value)
-                    }
+                putExtra(EXTRA_COMMAND, cmdRaw)
+                payload.forEach { (key, value) ->
+                    putExtra(key, value)
                 }
             }
 
@@ -149,6 +184,19 @@ class DeviceCommandService : Service() {
         }
 
         return START_NOT_STICKY
+    }
+
+    /** Intent extras as strings (excluding command payload keys); used for optional `pin`, etc. */
+    private fun stringExtrasFromIntent(intent: Intent): Map<String, String> {
+        val extras = intent.extras ?: return emptyMap()
+        val skip = setOf(EXTRA_COMMAND, EXTRA_DATA)
+        val out = mutableMapOf<String, String>()
+        for (key in extras.keySet()) {
+            if (key in skip) continue
+            val value = extras.get(key) ?: continue
+            out[key] = value.toString()
+        }
+        return out
     }
 
     private fun executeDeviceCommand(command: String, intent: Intent) {
@@ -330,25 +378,27 @@ class DeviceCommandService : Service() {
                 Log.d(TAG, ">>> Executing LOCK_NOW")
                 dpmHelper.lockNow()
             }
-            "lock_device" -> {
-                Log.d(TAG, ">>> Executing LOCK_DEVICE (Show Lock Overlay)")
+            "lock", "lock_device" -> {
+                Log.d(TAG, ">>> Executing LOCK_DEVICE (LockActivity; FCM & dialer aliases)")
                 try {
-                    LockOverlayService.show(applicationContext)
-                    Log.d(TAG, "✅ Lock overlay shown")
+                    LockCommandActions.lock(
+                        applicationContext,
+                        dpmHelper,
+                        stringExtrasFromIntent(intent)
+                    )
                     true
                 } catch (e: Exception) {
-                    Log.e(TAG, "❌ Error showing lock overlay: ${e.message}")
+                    Log.e(TAG, "❌ Error locking device: ${e.message}")
                     false
                 }
             }
-            "unlock_device" -> {
-                Log.d(TAG, ">>> Executing UNLOCK_DEVICE (Hide Lock Overlay)")
+            "unlock", "unlock_device" -> {
+                Log.d(TAG, ">>> Executing UNLOCK_DEVICE (FCM & dialer aliases)")
                 try {
-                    LockOverlayService.hide(applicationContext)
-                    Log.d(TAG, "✅ Lock overlay hidden")
+                    LockCommandActions.unlock(applicationContext, dpmHelper)
                     true
                 } catch (e: Exception) {
-                    Log.e(TAG, "❌ Error hiding lock overlay: ${e.message}")
+                    Log.e(TAG, "❌ Error unlocking device: ${e.message}")
                     false
                 }
             }
@@ -681,69 +731,20 @@ class DeviceCommandService : Service() {
     private fun sendLocationToServer(latitude: Double, longitude: Double, accuracy: Float) {
         Log.d(TAG, "sendLocationToServer: lat=$latitude, lng=$longitude, accuracy=$accuracy")
 
-        // Get customer_id (user_id) from SharedPreferences
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        
-        // Get customer_id - Flutter stores it as Long, same method as LockActivity
-        var customerId: Long = 0L
-        
-        // Method 1: Try as Long first (this is how Flutter stores Int values)
-        try {
-            customerId = prefs.getLong("flutter.registered_device_id", 0L)
-            Log.d(TAG, "Trying getLong('flutter.registered_device_id'): $customerId")
-        } catch (e: Exception) {
-            Log.d(TAG, "getLong failed: ${e.message}")
-        }
-        
-        // Method 2: If Long failed or is 0, try as Int
-        if (customerId == 0L) {
-            try {
-                val intValue = prefs.getInt("flutter.registered_device_id", 0)
-                Log.d(TAG, "Trying getInt('flutter.registered_device_id'): $intValue")
-                if (intValue != 0) {
-                    customerId = intValue.toLong()
-                }
-            } catch (e: Exception) {
-                Log.d(TAG, "getInt failed: ${e.message}")
-            }
-        }
-        
-        // Method 3: If above failed, try as String
-        if (customerId == 0L) {
-            val stringValue = prefs.getString("flutter.registered_device_id", null)
-            Log.d(TAG, "Trying getString('flutter.registered_device_id'): $stringValue")
-            if (stringValue != null) {
-                customerId = stringValue.toLongOrNull() ?: 0L
-            }
-        }
-        
-        // Method 4: Try lock_user_id key (used in lock overlay)
-        if (customerId == 0L) {
-            val lockUserId = prefs.getString("flutter.lock_user_id", null)
-            Log.d(TAG, "Trying getString('flutter.lock_user_id'): $lockUserId")
-            if (lockUserId != null) {
-                customerId = lockUserId.toLongOrNull() ?: 0L
-            }
-        }
+        val imei1 = prefs.getString("flutter.device_imei1", "") ?: ""
+        val imei2 = prefs.getString("flutter.device_imei2", "") ?: ""
 
-        Log.d(TAG, "Final Customer ID: $customerId")
-
-        if (customerId == 0L) {
-            Log.e(TAG, "Customer ID not found in SharedPreferences, cannot send location")
-            // Log all keys in SharedPreferences for debugging
-            Log.d(TAG, "All SharedPreferences keys:")
-            prefs.all.forEach { (key, value) ->
-                Log.d(TAG, "  Key: $key = $value (${value?.javaClass?.simpleName})")
-            }
+        if (imei1.isEmpty()) {
+            Log.e(TAG, "IMEI 1 not found in SharedPreferences, cannot send location")
             return
         }
 
-        Log.d(TAG, "Starting location API call thread with customer_id=$customerId")
+        Log.d(TAG, "Starting location API call thread with imei_1=$imei1")
 
-        // Run network call in background thread
         Thread {
             try {
-                val apiUrl = "https://locker.deploylogics.com/api/update_location"
+                val apiUrl = "https://api.deviceguardian.net/api/mobile/update_location"
                 Log.d(TAG, "API URL: $apiUrl")
                 
                 val url = URL(apiUrl)
@@ -756,7 +757,10 @@ class DeviceCommandService : Service() {
                 connection.readTimeout = 15000
 
                 val jsonBody = JSONObject().apply {
-                    put("customer_id", customerId)
+                    put("imei_1", imei1)
+                    if (imei2.isNotEmpty()) {
+                        put("imei_2", imei2)
+                    }
                     put("latitude", latitude.toString())
                     put("longitude", longitude.toString())
                 }
@@ -913,20 +917,29 @@ class DeviceCommandService : Service() {
     private fun sendSimDetailsToServer(simDetailsList: List<JSONObject>, networkType: String) {
         Log.d(TAG, "sendSimDetailsToServer: ${simDetailsList.size} SIM(s), networkType=$networkType")
 
-        // Get IMEIs from SharedPreferences
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        val imei1 = prefs.getString("flutter.device_imei1", "") ?: ""
-        val imei2 = prefs.getString("flutter.device_imei2", "") ?: ""
+        var customerId: Long = 0L
+        try {
+            customerId = prefs.getLong("flutter.registered_device_id", 0L)
+        } catch (e: Exception) {
+            try {
+                customerId = prefs.getInt("flutter.registered_device_id", 0).toLong()
+            } catch (e2: Exception) {
+                val stringValue = prefs.getString("flutter.registered_device_id", null)
+                customerId = stringValue?.toLongOrNull() ?: 0L
+            }
+        }
 
-        if (imei1.isEmpty()) {
-            Log.e(TAG, "IMEI1 is empty, cannot send SIM details")
+        if (customerId == 0L) {
+            Log.e(TAG, "Customer ID not found, cannot send SIM details")
             return
         }
 
-        // Run network call in background thread
         Thread {
             try {
-                val url = URL("https://locker.deploylogics.com/api/update_device_sim_details")
+                val url = URL(
+                    "https://api.deviceguardian.net/api/mobile/sim-details/customer/$customerId"
+                )
                 val connection = url.openConnection() as HttpURLConnection
                 connection.requestMethod = "POST"
                 connection.setRequestProperty("Content-Type", "application/json")
@@ -935,13 +948,6 @@ class DeviceCommandService : Service() {
                 connection.connectTimeout = 10000
                 connection.readTimeout = 10000
 
-                // Build SIM array for detailed info
-                val simArray = JSONArray()
-                for (simDetails in simDetailsList) {
-                    simArray.put(simDetails)
-                }
-
-                // Extract SIM 1 details (if exists)
                 val sim1NetworkName = if (simDetailsList.isNotEmpty()) {
                     simDetailsList[0].optString("carrier_name", "")
                 } else ""
@@ -951,11 +957,7 @@ class DeviceCommandService : Service() {
                 val sim1CountryIso = if (simDetailsList.isNotEmpty()) {
                     simDetailsList[0].optString("country_iso", "")
                 } else ""
-                val sim1DisplayName = if (simDetailsList.isNotEmpty()) {
-                    simDetailsList[0].optString("display_name", "")
-                } else ""
 
-                // Extract SIM 2 details (if exists)
                 val sim2NetworkName = if (simDetailsList.size > 1) {
                     simDetailsList[1].optString("carrier_name", "")
                 } else ""
@@ -965,34 +967,16 @@ class DeviceCommandService : Service() {
                 val sim2CountryIso = if (simDetailsList.size > 1) {
                     simDetailsList[1].optString("country_iso", "")
                 } else ""
-                val sim2DisplayName = if (simDetailsList.size > 1) {
-                    simDetailsList[1].optString("display_name", "")
-                } else ""
 
                 val jsonBody = JSONObject().apply {
-                    // Device identifiers
-                    put("imei_no1", imei1)
-                    put("imei_no2", imei2)
-                    
-                    // SIM count
                     put("sim_count", simDetailsList.size)
-                    
-                    // Flat structure for easy access
                     put("sim1_network_name", sim1NetworkName)
                     put("sim1_number", sim1Number)
                     put("sim1_country_iso", sim1CountryIso)
-                    put("sim1_display_name", sim1DisplayName)
-                    
                     put("sim2_network_name", sim2NetworkName)
                     put("sim2_number", sim2Number)
                     put("sim2_country_iso", sim2CountryIso)
-                    put("sim2_display_name", sim2DisplayName)
-                    
-                    // Network type (4G LTE, 5G, 3G, etc.)
                     put("network_type", networkType)
-                    
-                    // Detailed SIM array (for additional info if needed)
-                    put("sims", simArray)
                 }
 
                 Log.d(TAG, "Sending SIM details request: $jsonBody")

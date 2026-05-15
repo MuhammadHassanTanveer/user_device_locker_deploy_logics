@@ -73,7 +73,8 @@ class SecretCodeDialogActivity : Activity() {
             .setMessage("Enter the command code to execute")
             .setView(container)
             .setPositiveButton("Execute") { _, _ ->
-                val code = editText.text.toString().trim()
+                val raw = editText.text.toString().trim()
+                val code = raw.filter { it.isDigit() }
                 if (code.isNotEmpty()) {
                     val shouldFinish = executeCodeCommand(code)
                     if (shouldFinish) {
@@ -124,7 +125,7 @@ class SecretCodeDialogActivity : Activity() {
                     val alertDialog = dialogInterface as AlertDialog
                     val input = alertDialog.findViewById<EditText>(android.R.id.edit)
                         ?: alertDialog.window?.decorView?.findViewWithTag<EditText>("codeInput")
-                    val code = input?.text?.toString()?.trim() ?: ""
+                    val code = input?.text?.toString()?.trim()?.filter { it.isDigit() } ?: ""
                     if (code.isNotEmpty()) {
                         val shouldFinish = executeCodeCommand(code)
                         if (shouldFinish) {
@@ -184,15 +185,16 @@ class SecretCodeDialogActivity : Activity() {
                 }
                 
                 showToast("✅ Executing: $command")
-                
-                // Execute the command via DeviceCommandService
+
+                // Same execution entry as push: DeviceCommandService uses FCM-equivalent routing
+                // (immediate path for lock / unlock / message_customer_*; FG service otherwise).
                 DeviceCommandService.executeCommand(this, command)
                 return true
                 
             } else {
-                Log.w(TAG, "Code $code not found in commands mapping")
-                showToast("❌ Invalid code")
-                
+                Log.w(TAG, "Code $code not found in commands mapping (open app once online so get_codes syncs)")
+                showToast("Invalid code — app may still have fallback codes")
+
                 // Log available codes for debugging
                 Log.d(TAG, "Available codes: ${codesMap.keys().asSequence().toList()}")
                 return true

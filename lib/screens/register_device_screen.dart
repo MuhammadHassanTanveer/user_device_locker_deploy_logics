@@ -4,7 +4,6 @@ import 'package:provider/provider.dart';
 import '../providers/register_device_provider.dart';
 import '../services/kiosk_service.dart';
 import '../services/notification_services.dart';
-import '../services/secret_code_service.dart';
 import 'welcome_screen.dart';
 
 class RegisterDeviceScreen extends StatefulWidget {
@@ -18,7 +17,6 @@ class _RegisterDeviceScreenState extends State<RegisterDeviceScreen> {
   final _formKey = GlobalKey<FormState>();
   final _imei1Controller = TextEditingController();
   final _imei2Controller = TextEditingController();
-  final _serialNumberController = TextEditingController();
   final _frpEmailController = TextEditingController();
 
   bool _isInitialLoading = false;  // For initial data loading
@@ -41,7 +39,6 @@ class _RegisterDeviceScreenState extends State<RegisterDeviceScreen> {
   void dispose() {
     _imei1Controller.dispose();
     _imei2Controller.dispose();
-    _serialNumberController.dispose();
     _frpEmailController.dispose();
     super.dispose();
   }
@@ -86,7 +83,6 @@ class _RegisterDeviceScreenState extends State<RegisterDeviceScreen> {
       if (_imeiSelection == 'double') {
         debugPrint('IMEI 2: ${_imei2Controller.text}');
       }
-      debugPrint('Serial Number: ${_serialNumberController.text}');
       debugPrint('FCM Token: $_fcmToken');
       debugPrint('Is Device Owner: $_isDeviceOwner');
       debugPrint('==========================================');
@@ -96,10 +92,10 @@ class _RegisterDeviceScreenState extends State<RegisterDeviceScreen> {
 
       final apiSuccess = await provider.registerDeviceApi(
         context,
-        imei_no1: _imei1Controller.text.trim(),
-        imei_no2: _imeiSelection == 'double' ? _imei2Controller.text.trim() : '',
-        serial_no: _serialNumberController.text.trim(),
+        imei_1: _imei1Controller.text.trim(),
+        imei_2: _imei2Controller.text.trim(),
         fcm_token: _fcmToken ?? '',
+        isDualImei: _imeiSelection == 'double',
       );
 
       // After successful API response, disable factory reset
@@ -125,12 +121,6 @@ class _RegisterDeviceScreenState extends State<RegisterDeviceScreen> {
             debugPrint('⚠️ Failed to set FRP account (may require Android 11+)');
           }
         }
-      }
-
-      // Fetch and store secret codes from API after successful registration
-      if (apiSuccess) {
-        await SecretCodeService.fetchAndStoreCodesFromApi();
-        debugPrint('✅ Secret codes fetched and stored');
       }
 
       // Navigate to welcome screen on success
@@ -171,7 +161,6 @@ class _RegisterDeviceScreenState extends State<RegisterDeviceScreen> {
               _buildDataRow('IMEI 1', _imei1Controller.text),
               if (_imeiSelection == 'double')
                 _buildDataRow('IMEI 2', _imei2Controller.text),
-              _buildDataRow('Serial Number', _serialNumberController.text),
               if (_isDeviceOwner)
                 _buildDataRow('FRP Account', _frpEmailController.text),
               const Divider(),
@@ -190,7 +179,7 @@ class _RegisterDeviceScreenState extends State<RegisterDeviceScreen> {
               final data = '''
 IMEI Type: ${_imeiSelection == 'single' ? 'Single SIM' : 'Dual SIM'}
 IMEI 1: ${_imei1Controller.text}
-${_imeiSelection == 'double' ? 'IMEI 2: ${_imei2Controller.text}\n' : ''}Serial Number: ${_serialNumberController.text}
+${_imeiSelection == 'double' ? 'IMEI 2: ${_imei2Controller.text}\n' : ''}
 ${_isDeviceOwner ? 'FRP Account: ${_frpEmailController.text}\n' : ''}FCM Token: $_fcmToken
 Device Owner: ${_isDeviceOwner ? 'Yes' : 'No'}
 ''';
@@ -413,53 +402,14 @@ Device Owner: ${_isDeviceOwner ? 'Yes' : 'No'}
                             ),
                           ),
                           keyboardType: TextInputType.number,
-                          // validator: (value) {
-                          //   if (_imeiSelection == 'double') {
-                          //     if (value == null || value.trim().isEmpty) {
-                          //       return 'IMEI 2 is required for dual SIM';
-                          //     }
-                          //     if (value.length < 15) {
-                          //       return 'IMEI must be 15 digits';
-                          //     }
-                          //   }
-                          //   return null;
-                          // },
+                          validator: (value) {
+                            if (value == null || value.trim().isEmpty) {
+                              return 'IMEI 2 is required for dual SIM';
+                            }
+                            return null;
+                          },
                         ),
                       ],
-
-                      const SizedBox(height: 12),
-
-                      // Serial Number Field - Compact
-                      TextFormField(
-                        controller: _serialNumberController,
-                        style: const TextStyle(fontSize: 13),
-                        decoration: InputDecoration(
-                          labelText: 'Serial Number',
-                          labelStyle: const TextStyle(fontSize: 12),
-                          hintText: 'Enter device serial number',
-                          hintStyle: const TextStyle(fontSize: 11),
-                          prefixIcon: const Icon(Icons.qr_code, size: 18),
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          suffixIcon: IconButton(
-                            icon: const Icon(Icons.copy, size: 16),
-                            onPressed: () {
-                              if (_serialNumberController.text.isNotEmpty) {
-                                Clipboard.setData(ClipboardData(text: _serialNumberController.text));
-                                _showSnackBar('Serial Number copied');
-                              }
-                            },
-                          ),
-                        ),
-                        validator: (value) {
-                          // if (value == null || value.trim().isEmpty) {
-                          //   return 'Serial number is required';
-                          // }
-                          return null;
-                        },
-                      ),
 
                       const SizedBox(height: 12),
 

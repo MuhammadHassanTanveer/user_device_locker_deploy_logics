@@ -32,13 +32,16 @@ class LockActivity : Activity() {
     companion object {
         private const val TAG = "LockActivity"
         private const val PREFS_NAME = "FlutterSharedPreferences"
+        private const val UNLOCK_CODE_KEY = "flutter.unlock_code"
         private const val LOCK_CODE_KEY = "flutter.lock_code"
         private const val LOCK_PIN_KEY = "flutter.lock_pin"
+        private const val PIN_LENGTH = 6
         private const val DEVICE_LOCKED_KEY = "flutter.device_locked"
         private const val RETAILER_ID_KEY = "flutter.retailer_id"
         private const val RETAILER_NAME_KEY = "flutter.retailer_name"
         private const val RETAILER_NAME_URDU_KEY = "flutter.retailer_name_urdu"
         private const val RETAILER_PHONE_KEY = "flutter.retailer_phone"
+        private const val RETAILER_COMPANY_CODE_KEY = "flutter.retailer_company_code"
         private const val USER_ID_KEY = "flutter.registered_device_id"
         private const val WIFI_SETTINGS_REQUEST_CODE = 1001
         private const val ACTION_UNLOCK = "com.deploy_logics.user_device_locker.ACTION_UNLOCK_ACTIVITY"
@@ -64,7 +67,7 @@ class LockActivity : Activity() {
 
         fun setLocked(context: Context, locked: Boolean) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            prefs.edit().putBoolean(DEVICE_LOCKED_KEY, locked).apply()
+            prefs.edit().putBoolean(DEVICE_LOCKED_KEY, locked).commit()
 
             // If unlocking, also finish the current instance
             if (!locked) {
@@ -300,12 +303,21 @@ class LockActivity : Activity() {
 
         // Retailer Info Card
         val retailerId = prefs.getString(RETAILER_ID_KEY, "") ?: ""
+        val retailerCompanyCode = prefs.getString(RETAILER_COMPANY_CODE_KEY, "") ?: ""
         val retailerName = prefs.getString(RETAILER_NAME_KEY, "") ?: ""
         val retailerNameUrdu = prefs.getString(RETAILER_NAME_URDU_KEY, "") ?: ""
         val retailerPhone = prefs.getString(RETAILER_PHONE_KEY, "") ?: ""
 
-        if (retailerId.isNotEmpty() || retailerName.isNotEmpty() || retailerPhone.isNotEmpty()) {
-            contentLayout.addView(createRetailerInfoCard(retailerId, retailerName, retailerNameUrdu, retailerPhone))
+        if (retailerId.isNotEmpty() || retailerCompanyCode.isNotEmpty() || retailerName.isNotEmpty() || retailerPhone.isNotEmpty()) {
+            contentLayout.addView(
+                createRetailerInfoCard(
+                    retailerId,
+                    retailerCompanyCode,
+                    retailerName,
+                    retailerNameUrdu,
+                    retailerPhone
+                )
+            )
             contentLayout.addView(createSpacer(32))
         }
 
@@ -451,6 +463,7 @@ class LockActivity : Activity() {
 
     private fun createRetailerInfoCard(
         retailerId: String,
+        retailerCompanyCode: String,
         retailerName: String,
         retailerNameUrdu: String,
         retailerPhone: String
@@ -530,6 +543,11 @@ class LockActivity : Activity() {
             // Retailer ID
             if (retailerId.isNotEmpty() && retailerId != "null") {
                 addView(createInfoRow("🪪", "Retailer ID", retailerId, "ریٹیلر آئی ڈی"))
+            }
+
+            // Retailer / company code (CU… style)
+            if (retailerCompanyCode.isNotEmpty() && retailerCompanyCode != "null") {
+                addView(createInfoRow("🏷", "Company Code", retailerCompanyCode, "کمپنی کوڈ"))
             }
 
             // Retailer Name
@@ -1125,9 +1143,7 @@ class LockActivity : Activity() {
 
             // Get the current PIN from SharedPreferences
             val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val pin = prefs.getString(LOCK_PIN_KEY, null)
-                ?: prefs.getString(LOCK_CODE_KEY, "1234")
-                ?: "1234"
+            val pin = UnlockCodeApi.getStoredUnlockCode(prefs).ifEmpty { "000000" }
 
             // Step 3: Launch WifiSettingsActivity with proper flags to bring it to front
             Log.d(TAG, "Launching WifiSettingsActivity")
@@ -1267,14 +1283,15 @@ class LockActivity : Activity() {
 
         dialogContent.addView(createSpacer(24))
 
-        // PIN Input
+        // PIN Input (6 digits)
         pinEditText = EditText(this).apply {
-            hint = "Enter PIN"
+            hint = "Enter 6-digit code"
             setHintTextColor(colorTextMuted)
             setTextColor(colorTextPrimary)
             textSize = 24f
             gravity = Gravity.CENTER
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            filters = arrayOf(android.text.InputFilter.LengthFilter(PIN_LENGTH))
             setPadding(dp(16), dp(16), dp(16), dp(16))
 
             val inputDrawable = GradientDrawable().apply {
@@ -1424,64 +1441,51 @@ class LockActivity : Activity() {
         }
     }
 
-    private fun generateNewPin(): String {
-        // Generate a random 4-digit PIN
-        val random = java.util.Random()
-        val newPin = (1000 + random.nextInt(9000)).toString()
-        Log.d(TAG, "🔑 Generated new PIN: $newPin")
-        return newPin
-    }
+    private fun generateNewPin(): String = UnlockCodeApi.generateUnlockCode()
 
     private fun updatePinInSharedPreferences(newPin: String) {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit().apply {
-            putString(LOCK_CODE_KEY, newPin)
-            putString(LOCK_PIN_KEY, newPin)
-            apply()
-        }
-        Log.d(TAG, "🔑 Updated PIN in SharedPreferences: $newPin")
+        UnlockCodeApi.saveUnlockCodeLocally(prefs, newPin)
+        Log.d(TAG, "🔑 Updated unlock code in SharedPreferences: $newPin")
     }
 
     private fun verifyPin() {
         val enteredPin = pinEditText.text.toString().trim()
         Log.d(TAG, "Verifying PIN...")
 
-        if (enteredPin.isEmpty()) {
-            errorTextView.text = "Please enter a PIN"
+        if (enteredPin.length != PIN_LENGTH) {
+            errorTextView.text = "Please enter a $PIN_LENGTH-digit code"
             return
         }
 
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        var storedPin = prefs.getString(LOCK_CODE_KEY, null)
-        if (storedPin.isNullOrEmpty() || storedPin == "null") {
-            storedPin = prefs.getString(LOCK_PIN_KEY, "1234")
-        }
+        val storedPin = UnlockCodeApi.getStoredUnlockCode(prefs)
 
         Log.d(TAG, "Entered: $enteredPin, Stored: $storedPin")
 
         if (enteredPin == storedPin) {
-            Log.d(TAG, "✅ PIN matches!")
-            // Generate a new PIN so the same one cannot be reused
+            Log.d(TAG, "✅ Unlock code matches!")
             val newPin = generateNewPin()
             updatePinInSharedPreferences(newPin)
 
-            // Call API to update actual device status to 'unlock' with new PIN
-            Log.d(TAG, "📤 Calling updateActualDeviceStatus API with new PIN and status: unlock")
-            DeviceStatusApi.updateActualDeviceStatus(
-                context = applicationContext,
-                lockCode = newPin,
-                actualDeviceStatus = "unlock"
-            )
+            Log.d(TAG, "📤 Calling update_unlock_code API with new code")
+            UnlockCodeApi.updateUnlockCode(applicationContext, newPin)
 
             unlockDevice()
         } else {
-            Log.d(TAG, "❌ Wrong PIN")
-            errorTextView.text = "Wrong PIN. Please try again."
+            Log.d(TAG, "❌ Wrong unlock code")
+            errorTextView.text = "Wrong code. Please try again."
             pinEditText.text.clear()
         }
     }
 
     private fun unlockDevice() {
+        Log.d(TAG, "📤 update_actual_device_status (0) — correct PIN unlock")
+
+        LockCommandActions.onUnlockCompleted(applicationContext)
+
+        DeviceStatusApi.updateActualDeviceStatus(applicationContext, "", "unlock")
+
         setLocked(this, false)
 
         if (dpmHelper.isDeviceOwner()) {
@@ -1513,12 +1517,14 @@ class LockActivity : Activity() {
     fun unlockAndFinish() {
         Log.d(TAG, "unlockAndFinish() called")
 
+        LockCommandActions.onUnlockCompleted(applicationContext)
+
         // Set unlocking flag to prevent restart in onPause/onDestroy
         isUnlocking = true
 
         // Set locked state to false directly (don't call setLocked to avoid recursion)
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        prefs.edit().putBoolean(DEVICE_LOCKED_KEY, false).apply()
+        prefs.edit().putBoolean(DEVICE_LOCKED_KEY, false).commit()
         Log.d(TAG, "✅ Lock state set to false")
 
         // Enable status bar and unlock settings

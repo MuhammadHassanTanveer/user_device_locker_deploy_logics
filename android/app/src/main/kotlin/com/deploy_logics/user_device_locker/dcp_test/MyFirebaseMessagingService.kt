@@ -22,9 +22,6 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
     companion object {
         private const val TAG = "MyFirebaseMsgService"
-        private const val PREFS_NAME = "FlutterSharedPreferences"
-        private const val USER_ID_KEY = "flutter.registered_device_id"
-        private const val PIN_KEY = "flutter.lock_pin"
         private const val CHANNEL_ID = "fcm_command_channel"
         private const val NOTIFICATION_ID = 3001
     }
@@ -126,7 +123,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         // Execute lock/unlock/message_customer commands directly (they don't need foreground service)
         // message_customer commands show an overlay which needs to be shown immediately
         if (deviceCommand == "lock" || deviceCommand == "unlock" || deviceCommand.startsWith("message_customer_")) {
-            executeCommandDirectly(deviceCommand, remoteMessage.data)
+            executeCommandDirectly(deviceCommand, remoteMessage.data, remoteMessage.sentTime)
         } else {
             // For other commands, use foreground service to ensure execution
             startCommandForegroundService(deviceCommand, remoteMessage.data)
@@ -169,20 +166,24 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
      * Execute device command directly in this service
      * This is the same approach that works for lock/unlock
      */
-    private fun executeCommandDirectly(command: String, data: Map<String, String>) {
+    private fun executeCommandDirectly(
+        command: String,
+        data: Map<String, String>,
+        fcmSentTimeMillis: Long = 0L,
+    ) {
         Log.d(TAG, "===========================================")
-        Log.d(TAG, ">>> Executing command DIRECTLY: '$command'")
+        Log.d(TAG, ">>> Executing command DIRECTLY: '$command' (fcmSentTime=$fcmSentTimeMillis)")
         Log.d(TAG, "===========================================")
 
         when (command) {
             // ==================== Device Lock/Unlock ====================
             "lock" -> {
                 Log.d(TAG, ">>> LOCK command")
-                handleLockCommand(data)
+                handleLockCommand(data, fcmSentTimeMillis)
             }
             "unlock" -> {
                 Log.d(TAG, ">>> UNLOCK command")
-                handleUnlockCommand()
+                handleUnlockCommand(fcmSentTimeMillis)
             }
 
             // ==================== Camera Control ====================
@@ -712,152 +713,15 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         }
     }
 
-    private fun handleLockCommand(data: Map<String, String>) {
-        Log.d(TAG, "handleLockCommand started")
-
-        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        val userId = try {
-            prefs.getLong(USER_ID_KEY, 0L)
-        } catch (e: ClassCastException) {
-            Log.d(TAG, "ClassCastException, trying getInt")
-            try {
-                prefs.getInt(USER_ID_KEY, 0).toLong()
-            } catch (e2: Exception) {
-                0L
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error reading user ID: ${e.message}")
-            0L
-        }
-        val userIdString = if (userId != 0L) userId.toString() else ""
-        Log.d(TAG, "User ID: $userIdString")
-
-        // Get PIN: use from notification data, OR existing lock_code from SharedPreferences
-        // Only default to '1234' if no lock code exists at all
-        val pin: String = if (!data["pin"].isNullOrEmpty()) {
-            Log.d(TAG, "Using PIN from notification: ${data["pin"]}")
-            data["pin"]!!
-        } else {
-            // Try to get existing lock code from SharedPreferences
-            val existingCode = prefs.getString("flutter.lock_code", null)
-                ?: prefs.getString(PIN_KEY, null)
-                ?: ""
-            Log.d(TAG, "Using existing lock code from SharedPreferences: $existingCode")
-            existingCode
-        }
-        Log.d(TAG, "PIN to use: $pin")
-
-        // Save lock state and PIN to SharedPreferences
-        prefs.edit()
-            .putString(PIN_KEY, pin)
-            .putBoolean("flutter.device_locked", true)
-            .apply()
-        Log.d(TAG, "✅ Lock state saved to SharedPreferences")
-
-        // Call API to update actual device status to 'lock'
-        Log.d(TAG, "📤 Calling updateActualDeviceStatus API with status: lock")
-        DeviceStatusApi.updateActualDeviceStatus(
-            context = applicationContext,
-            lockCode = pin,
-            actualDeviceStatus = "lock"
-        )
-
-        // Disable status bar first
-        try {
-            if (dpmHelper.isDeviceOwner()) {
-                dpmHelper.setStatusBarDisabled(true)
-                Log.d(TAG, "✅ Status bar disabled")
-                dpmHelper.lockSettingsWhenOverlayShown()
-                Log.d(TAG, "✅ Settings locked")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error disabling status bar: ${e.message}")
-        }
-
-        // Start LockActivity with Lock Task Mode (more reliable than overlay)
-        try {
-            LockActivity.setLocked(applicationContext, true)
-            LockActivity.start(applicationContext)
-            Log.d(TAG, "✅ LockActivity started with Lock Task Mode")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error starting LockActivity: ${e.message}")
-        }
-
-        // NOTE: Flutter overlay will also be shown by Dart background handler as backup
-        Log.d(TAG, "Lock command processed")
+    private fun handleLockCommand(data: Map<String, String>, fcmSentTimeMillis: Long) {
+        Log.d(TAG, "handleLockCommand -> LockCommandActions.lock")
+        val msgTime = fcmSentTimeMillis.takeIf { it > 0L }
+        LockCommandActions.lock(this, dpmHelper, data, msgTime)
     }
 
-    private fun handleUnlockCommand() {
-        Log.d(TAG, "handleUnlockCommand started")
-
-        // Save unlock state to SharedPreferences
-        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        prefs.edit()
-            .putBoolean("flutter.device_locked", false)
-            .apply()
-        Log.d(TAG, "✅ Unlock state saved to SharedPreferences")
-
-        // Get current lock code to send to API
-        val currentLockCode = prefs.getString(PIN_KEY, null)
-            ?: prefs.getString("flutter.lock_code", "1234")
-            ?: "1234"
-
-        // Call API to update actual device status to 'unlock'
-        Log.d(TAG, "📤 Calling updateActualDeviceStatus API with status: unlock")
-        DeviceStatusApi.updateActualDeviceStatus(
-            context = applicationContext,
-            lockCode = currentLockCode,
-            actualDeviceStatus = "unlock"
-        )
-
-        // Stop LockActivity
-        try {
-            LockActivity.setLocked(applicationContext, false)
-            Log.d(TAG, "✅ LockActivity stopped")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping LockActivity: ${e.message}")
-        }
-
-        // Hide LockOverlayService if showing
-        try {
-            if (LockOverlayService.isShowing) {
-                Log.d(TAG, "🔓 LockOverlayService is showing - hiding it...")
-                LockOverlayService.hide(applicationContext)
-                Log.d(TAG, "✅ LockOverlayService hidden")
-            } else {
-                Log.d(TAG, "📝 LockOverlayService not showing - no need to hide")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error hiding LockOverlayService: ${e.message}")
-        }
-
-        // Hide MessageOverlayService if showing
-        try {
-            if (MessageOverlayService.isShowing) {
-                Log.d(TAG, "📝 MessageOverlay is showing - hiding it...")
-                MessageOverlayService.hide(applicationContext)
-                Log.d(TAG, "✅ MessageOverlayService hidden")
-            } else {
-                Log.d(TAG, "📝 MessageOverlay not showing - no need to hide")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error hiding MessageOverlayService: ${e.message}")
-        }
-
-        // Enable status bar and unlock settings
-        try {
-            if (dpmHelper.isDeviceOwner()) {
-                val statusBarResult = dpmHelper.setStatusBarDisabled(false)
-                Log.d(TAG, "✅ Status bar enabled: $statusBarResult")
-
-                val unlockResult = dpmHelper.unlockSettingsWhenOverlayHidden()
-                Log.d(TAG, "✅ Settings unlocked: $unlockResult")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error enabling status bar: ${e.message}")
-        }
-
-        Log.d(TAG, "Unlock command processed")
+    private fun handleUnlockCommand(fcmSentTimeMillis: Long) {
+        Log.d(TAG, "handleUnlockCommand -> LockCommandActions.unlock")
+        LockCommandActions.unlock(this, dpmHelper, fcmSentTimeMillis)
     }
 
     override fun onNewToken(token: String) {

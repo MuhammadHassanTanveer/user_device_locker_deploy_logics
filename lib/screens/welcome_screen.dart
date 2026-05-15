@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import '../models/mobile_api_models.dart';
 import '../providers/register_device_provider.dart';
 import '../services/kiosk_service.dart';
+import '../services/secret_code_service.dart';
 import 'test_device_screen.dart';
 
 class WelcomeScreen extends StatefulWidget {
@@ -11,11 +13,11 @@ class WelcomeScreen extends StatefulWidget {
 }
 
 class _WelcomeScreenState extends State<WelcomeScreen> {
-  int? _userId;
-  bool _isDeviceOwner = false;
-  bool _isTokenActive = false;
-  bool _isSettingUpToken = false;
+  final ScrollController _scrollController = ScrollController();
   final RegisterDeviceProvider _provider = RegisterDeviceProvider();
+
+  CustomerProfile? _customer;
+  bool _isDeviceOwner = false;
   bool _hasCalledLockCodeApi = false;
 
   @override
@@ -25,9 +27,14 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
   }
 
   @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Call _fetchLockCode only once when dependencies are ready
     if (!_hasCalledLockCodeApi) {
       _hasCalledLockCodeApi = true;
       _fetchLockCode();
@@ -35,120 +42,34 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
   }
 
   Future<void> _loadDeviceInfo() async {
-    final userId = await RegisterDeviceProvider.getUserId();
+    final customer = await RegisterDeviceProvider.getCustomerProfile();
     final isDeviceOwner = await KioskService.isDeviceOwner();
-    
-    // Check if password token is active
-    bool tokenActive = false;
-    if (isDeviceOwner) {
-      tokenActive = await KioskService.isResetPasswordTokenActive();
-    }
 
     if (mounted) {
       setState(() {
-        _userId = userId;
+        _customer = customer;
         _isDeviceOwner = isDeviceOwner;
-        _isTokenActive = tokenActive;
       });
-    }
-  }
-
-  /// Setup password reset token for remote password management
-  Future<void> _setupPasswordToken() async {
-    if (!_isDeviceOwner) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Device Owner permission required'),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
-
-    setState(() => _isSettingUpToken = true);
-
-    try {
-      final result = await KioskService.setupPasswordResetTokenWithStatus();
-      final success = result['success'] == true;
-      final tokenActive = result['tokenActive'] == true;
-      final needsUnlock = result['needsUserUnlock'] == true;
-      final message = result['message'] ?? '';
-
-      if (mounted) {
-        setState(() {
-          _isTokenActive = tokenActive;
-          _isSettingUpToken = false;
-        });
-
-        if (tokenActive) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('✅ Password token active! Remote password management ready.'),
-              backgroundColor: Colors.green,
-              duration: Duration(seconds: 3),
-            ),
-          );
-        } else if (needsUnlock) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: const Text('⚠️ Token set! Lock and unlock your device once to activate.'),
-              backgroundColor: Colors.orange,
-              duration: const Duration(seconds: 5),
-              action: SnackBarAction(
-                label: 'OK',
-                textColor: Colors.white,
-                onPressed: () {},
-              ),
-            ),
-          );
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(message.isNotEmpty ? message : 'Token setup completed'),
-              backgroundColor: success ? Colors.green : Colors.red,
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _isSettingUpToken = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
     }
   }
 
   Future<void> _fetchLockCode() async {
     try {
-      debugPrint('🔑🔑🔑 _fetchLockCode() CALLED 🔑🔑🔑');
+      if (!mounted) return;
 
-      // Check if IMEI is available
       final imei1 = await RegisterDeviceProvider.getImei1();
-      debugPrint('🔑 IMEI1 from SharedPreferences: "$imei1"');
-
+      // Without IMEI we cannot call get_lock_code; still refresh dialer codes when customer_id exists.
       if (imei1 == null || imei1.isEmpty) {
-        debugPrint('⚠️ IMEI1 is empty or null - API call will be skipped');
-        debugPrint('⚠️ Make sure device is registered before opening WelcomeScreen');
+        await SecretCodeService.fetchAndStoreCodesFromApi();
         return;
       }
 
-      // Ensure widget is still mounted before using context
-      if (!mounted) {
-        debugPrint('⚠️ Widget not mounted - skipping API call');
-        return;
+      await _provider.getLockCodeApi(context);
+      if (mounted) {
+        await _loadDeviceInfo();
       }
-
-      debugPrint('🔑 Calling getLockCodeApi...');
-      // Call getLockCodeApi to fetch and store lock code info
-      final result = await _provider.getLockCodeApi(context);
-      debugPrint('🔑 getLockCodeApi result: $result');
     } catch (e, stackTrace) {
-      debugPrint('❌ Error fetching lock code: $e');
+      debugPrint('❌ Error fetching unlock code: $e');
       debugPrint('❌ Stack trace: $stackTrace');
     }
   }
@@ -157,50 +78,47 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
+        child: Scrollbar(
+          controller: _scrollController,
+          child: SingleChildScrollView(
+            controller: _scrollController,
+            padding: const EdgeInsets.all(24),
             child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Success Icon
-                Container(
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    color: Colors.green.withValues(alpha: 0.1),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.check_circle,
-                    size: 80,
-                    color: Colors.green,
+                const SizedBox(height: 16),
+                Center(
+                  child: Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: Colors.green.withValues(alpha: 0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.check_circle,
+                      size: 80,
+                      color: Colors.green,
+                    ),
                   ),
                 ),
-
                 const SizedBox(height: 32),
-
-                // Welcome Text
                 Text(
                   'Device Registered!',
+                  textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.bold,
-                    color: Colors.green,
-                  ),
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green,
+                      ),
                 ),
-
                 const SizedBox(height: 12),
-
                 Text(
                   'Your device has been successfully registered and is now ready for remote management.',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: Colors.grey[600],
-                  ),
+                        color: Colors.grey[600],
+                      ),
                 ),
-
                 const SizedBox(height: 32),
-
-                // Device Info Card
                 Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
@@ -214,22 +132,49 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
                     children: [
                       _buildInfoRow(
                         icon: Icons.fingerprint,
-                        label: 'User ID',
-                        value: _userId?.toString() ?? 'Loading...',
+                        label: 'Customer ID',
+                        value: _customer?.customerId.toString() ?? 'Loading...',
                       ),
+                      if (_customer?.customerName.isNotEmpty == true) ...[
+                        const Divider(height: 16),
+                        _buildInfoRow(
+                          icon: Icons.person,
+                          label: 'Customer Name',
+                          value: _customer!.customerName,
+                        ),
+                      ],
+                      if (_customer?.customerCode.isNotEmpty == true) ...[
+                        const Divider(height: 16),
+                        _buildInfoRow(
+                          icon: Icons.qr_code_2,
+                          label: 'Customer Code',
+                          value: _customer!.customerCode,
+                        ),
+                      ],
+                      if (_customer?.mobileModel.isNotEmpty == true) ...[
+                        const Divider(height: 16),
+                        _buildInfoRow(
+                          icon: Icons.phone_android,
+                          label: 'Device Model',
+                          value: _customer!.mobileModel,
+                        ),
+                      ],
+                      if (_customer != null) ...[
+                        const Divider(height: 16),
+                        _buildInfoRow(
+                          icon: Icons.circle,
+                          label: 'Account Status',
+                          value: _customer!.statusLabel,
+                          valueColor:
+                              _customer!.isDeviceActive ? Colors.green : Colors.orange,
+                        ),
+                      ],
                       const Divider(height: 16),
                       _buildInfoRow(
                         icon: Icons.admin_panel_settings,
                         label: 'Device Owner',
                         value: _isDeviceOwner ? 'Active' : 'Not Active',
                         valueColor: _isDeviceOwner ? Colors.green : Colors.orange,
-                      ),
-                      const Divider(height: 16),
-                      _buildInfoRow(
-                        icon: Icons.vpn_key,
-                        label: 'Password Token',
-                        value: _isTokenActive ? 'Active' : 'Not Active',
-                        valueColor: _isTokenActive ? Colors.green : Colors.orange,
                       ),
                       const Divider(height: 16),
                       _buildInfoRow(
@@ -241,69 +186,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
                     ],
                   ),
                 ),
-
-                // Password Token Setup Button (only show if device owner and token not active)
-                if (_isDeviceOwner && !_isTokenActive) ...[
-                  const SizedBox(height: 16),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
-                    ),
-                    child: Column(
-                      children: [
-                        const Row(
-                          children: [
-                            Icon(Icons.warning_amber, color: Colors.orange, size: 20),
-                            SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                'Setup required for remote password management',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.orange,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton.icon(
-                            onPressed: _isSettingUpToken ? null : _setupPasswordToken,
-                            icon: _isSettingUpToken
-                                ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(strokeWidth: 2),
-                                  )
-                                : const Icon(Icons.vpn_key, size: 18),
-                            label: Text(_isSettingUpToken ? 'Setting up...' : 'Setup Password Token'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.orange,
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 10),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        const Text(
-                          'After setup, lock and unlock your device once to activate',
-                          style: TextStyle(fontSize: 10, color: Colors.grey),
-                          textAlign: TextAlign.center,
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-
                 const SizedBox(height: 32),
-
-                // Status indicators
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -320,10 +203,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
                     ),
                   ],
                 ),
-
                 const SizedBox(height: 32),
-
-                // Continue Button
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
@@ -352,6 +232,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
                     ),
                   ),
                 ),
+                const SizedBox(height: 16),
               ],
             ),
           ),
@@ -379,12 +260,15 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
             ),
           ),
         ),
-        Text(
-          value,
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w600,
-            color: valueColor ?? Colors.black87,
+        Flexible(
+          child: Text(
+            value,
+            textAlign: TextAlign.end,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: valueColor ?? Colors.black87,
+            ),
           ),
         ),
       ],
@@ -420,4 +304,3 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
     );
   }
 }
-

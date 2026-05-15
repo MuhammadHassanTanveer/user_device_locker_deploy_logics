@@ -8,6 +8,7 @@ import android.util.Log
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.concurrent.thread
@@ -18,15 +19,15 @@ import kotlin.concurrent.thread
  */
 object CustomerStatusApi {
     private const val TAG = "CustomerStatusApi"
-    private const val BASE_URL = "https://locker.deploylogics.com/api"
+    private const val BASE_URL = "https://api.deviceguardian.net/api"
     private const val PREFS_NAME = "FlutterSharedPreferences"
-    private const val USER_ID_KEY = "flutter.registered_device_id"
+    private const val IMEI1_KEY = "flutter.device_imei1"
+    private const val IMEI2_KEY = "flutter.device_imei2"
     private const val PENDING_UNINSTALL_SYNC_KEY = "flutter.pending_uninstall_status_sync"
+    private const val UNINSTALL_IS_ACTIVE_STATUS = 2
 
     /**
-     * Update customer is_active status to inactive (status=2) before uninstall
-     * @param context Android context
-     * @param callback Optional callback to be invoked after API call completes
+     * Update customer is_active status to inactive (is_active=2) before uninstall
      */
     fun updateCustomerStatusForUninstall(
         context: Context,
@@ -35,88 +36,63 @@ object CustomerStatusApi {
         thread {
             try {
                 val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val imei1 = prefs.getString(IMEI1_KEY, "") ?: ""
+                val imei2 = prefs.getString(IMEI2_KEY, "") ?: ""
 
-                // Get user ID (customer_id)
-                val userId = getUserId(prefs)
-
-                if (userId == 0L) {
-                    Log.e(TAG, "❌ User ID not found - cannot update customer status")
+                if (imei1.isEmpty()) {
+                    Log.e(TAG, "❌ IMEI 1 not found - cannot update customer status")
                     callback?.invoke(false)
                     return@thread
                 }
 
                 Log.d(TAG, "╔══════════════════════════════════════════════════════════╗")
                 Log.d(TAG, "║  📤 Updating Customer Status for Uninstall              ║")
-                Log.d(TAG, "║  customer_id: $userId                                    ")
-                Log.d(TAG, "║  status: 2 (inactive)                                    ║")
+                Log.d(TAG, "║  imei_1: $imei1")
+                if (imei2.isNotEmpty()) Log.d(TAG, "║  imei_2: $imei2")
+                Log.d(TAG, "║  is_active: $UNINSTALL_IS_ACTIVE_STATUS (inactive)       ║")
                 Log.d(TAG, "╚══════════════════════════════════════════════════════════╝")
 
-                // Check internet connectivity
                 if (!isNetworkAvailable(context)) {
                     Log.w(TAG, "⚠️ No internet connection - saving for later sync")
-                    savePendingUninstallSync(prefs, userId)
+                    savePendingUninstallSync(prefs, imei1, imei2, UNINSTALL_IS_ACTIVE_STATUS)
                     callback?.invoke(false)
                     return@thread
                 }
 
-                val success = makeApiCall(userId)
+                val success = makeApiCall(imei1, imei2, UNINSTALL_IS_ACTIVE_STATUS)
 
                 if (success) {
                     Log.d(TAG, "✅ Customer status updated successfully on server")
-                    // Clear any pending sync
                     prefs.edit().remove(PENDING_UNINSTALL_SYNC_KEY).apply()
                 } else {
                     Log.w(TAG, "⚠️ API call failed - saving for later sync")
-                    savePendingUninstallSync(prefs, userId)
+                    savePendingUninstallSync(prefs, imei1, imei2, UNINSTALL_IS_ACTIVE_STATUS)
                 }
-                
+
                 callback?.invoke(success)
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error updating customer status: ${e.message}")
                 e.printStackTrace()
 
-                // Save for later sync
                 try {
                     val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    val userId = getUserId(prefs)
-
-                    if (userId != 0L) {
-                        savePendingUninstallSync(prefs, userId)
+                    val imei1 = prefs.getString(IMEI1_KEY, "") ?: ""
+                    val imei2 = prefs.getString(IMEI2_KEY, "") ?: ""
+                    if (imei1.isNotEmpty()) {
+                        savePendingUninstallSync(prefs, imei1, imei2, UNINSTALL_IS_ACTIVE_STATUS)
                     }
                 } catch (e2: Exception) {
                     Log.e(TAG, "❌ Error saving pending sync: ${e2.message}")
                 }
-                
+
                 callback?.invoke(false)
             }
         }
     }
 
-    /**
-     * Get user ID from SharedPreferences, handling different storage types
-     */
-    private fun getUserId(prefs: android.content.SharedPreferences): Long {
-        return try {
-            prefs.getLong(USER_ID_KEY, 0L)
-        } catch (e: ClassCastException) {
-            try {
-                prefs.getInt(USER_ID_KEY, 0).toLong()
-            } catch (e2: Exception) {
-                try {
-                    prefs.getString(USER_ID_KEY, null)?.toLongOrNull() ?: 0L
-                } catch (e3: Exception) {
-                    0L
-                }
-            }
-        }
-    }
-
-    /**
-     * Check if network is available
-     */
     private fun isNetworkAvailable(context: Context): Boolean {
         val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val network = connectivityManager.activeNetwork ?: return false
             val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
@@ -129,25 +105,35 @@ object CustomerStatusApi {
         }
     }
 
-    /**
-     * Make the actual API call to update customer status
-     */
-    private fun makeApiCall(customerId: Long): Boolean {
+    private fun makeApiCall(imei1: String, imei2: String, isActive: Int): Boolean {
         var connection: HttpURLConnection? = null
         try {
-            // Build URL with query parameters
-            val urlString = "$BASE_URL/update_cutomer_is_active_status?customer_id=$customerId&status=2"
-            val url = URL(urlString)
-            
-            Log.d(TAG, "🌐 API URL: $urlString")
-            
+            val url = URL("$BASE_URL/mobile/update_customer_is_active_status")
+            Log.d(TAG, "🌐 API URL: $url")
+
             connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Content-Type", "application/json")
             connection.setRequestProperty("Accept", "application/json")
+            connection.doOutput = true
             connection.connectTimeout = 15000
             connection.readTimeout = 15000
 
-            // Get response
+            val jsonBody = JSONObject().apply {
+                put("imei_1", imei1)
+                put("is_active", isActive)
+                if (imei2.isNotEmpty()) {
+                    put("imei_2", imei2)
+                }
+            }
+
+            Log.d(TAG, "🌐 Request body: $jsonBody")
+
+            OutputStreamWriter(connection.outputStream).use { writer ->
+                writer.write(jsonBody.toString())
+                writer.flush()
+            }
+
             val responseCode = connection.responseCode
             Log.d(TAG, "🌐 Response code: $responseCode")
 
@@ -157,12 +143,10 @@ object CustomerStatusApi {
                 }
                 Log.d(TAG, "🌐 Response: $response")
 
-                // Try to parse response as JSON
                 try {
                     val jsonResponse = JSONObject(response)
-                    return jsonResponse.optBoolean("success", true) // Default to true if not specified
+                    return jsonResponse.optBoolean("success", true)
                 } catch (e: Exception) {
-                    // If response is not JSON, consider it successful if HTTP 200
                     Log.d(TAG, "Response is not JSON, considering successful based on HTTP 200")
                     return true
                 }
@@ -183,26 +167,22 @@ object CustomerStatusApi {
         }
     }
 
-    /**
-     * Save pending uninstall status sync for when internet becomes available
-     */
     private fun savePendingUninstallSync(
         prefs: android.content.SharedPreferences,
-        customerId: Long
+        imei1: String,
+        imei2: String,
+        isActive: Int
     ) {
         val pendingData = JSONObject().apply {
-            put("customer_id", customerId)
-            put("status", 2)
+            put("imei_1", imei1)
+            put("imei_2", imei2)
+            put("is_active", isActive)
             put("timestamp", System.currentTimeMillis())
         }
         prefs.edit().putString(PENDING_UNINSTALL_SYNC_KEY, pendingData.toString()).apply()
         Log.d(TAG, "💾 Pending uninstall sync data saved: $pendingData")
     }
 
-    /**
-     * Sync any pending customer status updates
-     * Call this when internet becomes available
-     */
     fun syncPendingUninstallStatus(context: Context, callback: ((success: Boolean) -> Unit)? = null) {
         thread {
             try {
@@ -218,9 +198,22 @@ object CustomerStatusApi {
                 Log.d(TAG, "📤 Found pending uninstall sync data: $pendingDataStr")
 
                 val pendingData = JSONObject(pendingDataStr)
-                val customerId = pendingData.getLong("customer_id")
+                val imei1 = pendingData.optString("imei_1", "")
+                    .ifEmpty { prefs.getString(IMEI1_KEY, "") ?: "" }
+                val imei2 = pendingData.optString("imei_2", "")
+                    .ifEmpty { prefs.getString(IMEI2_KEY, "") ?: "" }
+                val isActive = pendingData.optInt(
+                    "is_active",
+                    pendingData.optInt("status", UNINSTALL_IS_ACTIVE_STATUS)
+                )
 
-                val success = makeApiCall(customerId)
+                if (imei1.isEmpty()) {
+                    Log.e(TAG, "❌ IMEI 1 missing in pending sync")
+                    callback?.invoke(false)
+                    return@thread
+                }
+
+                val success = makeApiCall(imei1, imei2, isActive)
 
                 if (success) {
                     prefs.edit().remove(PENDING_UNINSTALL_SYNC_KEY).apply()
@@ -228,7 +221,7 @@ object CustomerStatusApi {
                 } else {
                     Log.w(TAG, "⚠️ Pending uninstall sync failed - will retry later")
                 }
-                
+
                 callback?.invoke(success)
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error syncing pending uninstall status: ${e.message}")
@@ -237,12 +230,8 @@ object CustomerStatusApi {
         }
     }
 
-    /**
-     * Check if there's a pending uninstall sync
-     */
     fun hasPendingUninstallSync(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return !prefs.getString(PENDING_UNINSTALL_SYNC_KEY, null).isNullOrEmpty()
     }
 }
-

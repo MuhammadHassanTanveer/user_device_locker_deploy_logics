@@ -4,10 +4,16 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/mobile_api_models.dart';
 import '../providers/register_device_provider.dart';
-import '../util/app_constants.dart';
+import '../util/api_response.dart';
+import '../util/mobile_api_endpoints.dart';
 
 /// Service to manage secret command codes for dialer-based device control.
+///
+/// [fetchAndStoreCodesFromApi] is invoked automatically after every
+/// [RegisterDeviceProvider.getLockCodeApi] call (`finally` block), so `*#*#9009#*#*`
+/// mappings stay in sync with the server whenever the unlock/lock metadata is refreshed.
 /// 
 /// Users can dial *#*#9009#*#* on the phone dialer to open a command dialog.
 /// The codes entered in the dialog are matched against stored codes from API.
@@ -25,7 +31,7 @@ class SecretCodeService {
   static const String _fcmTokenKey = 'cached_fcm_token';
 
   /// Fetch command codes from API and store them
-  /// API endpoint: https://locker.deploylogics.com/api/get_codes?customer_id=
+  /// API endpoint: /mobile/get_codes?customer_id=
   /// 
   /// Response format:
   /// {
@@ -47,7 +53,9 @@ class SecretCodeService {
         return await initializeWithDefaultCodes();
       }
       
-      final url = Uri.parse('${AppConstants.baseUrl}/get_codes?customer_id=$customerId');
+      final url = Uri.parse(
+        MobileApiEndpoints.url(MobileApiEndpoints.getCodes(customerId)),
+      );
       debugPrint('SecretCodeService: Fetching codes from: $url');
       
       final response = await http.get(
@@ -61,69 +69,39 @@ class SecretCodeService {
       debugPrint('SecretCodeService: Response status: ${response.statusCode}');
       debugPrint('SecretCodeService: Response body: ${response.body}');
 
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        
-        if (responseData['success'] == true && responseData['data'] != null) {
-          final data = responseData['data'];
-          
-          // Map API response codes to commands
-          // The API returns: "enable_camera_code": "193949"
-          // We need to store: "193949" -> "enable_camera"
-          final Map<String, String> codes = {};
-          
-          // Map each code from API to its command
-          _mapCodeToCommand(codes, data, 'lock_device_code', 'lock_device');
-          _mapCodeToCommand(codes, data, 'unlock_device_code', 'unlock_device');
-          _mapCodeToCommand(codes, data, 'enable_camera_code', 'enable_camera');
-          _mapCodeToCommand(codes, data, 'disable_camera_code', 'disable_camera');
-          _mapCodeToCommand(codes, data, 'show_social_app_code', 'show_social_apps');
-          _mapCodeToCommand(codes, data, 'hide_social_app_code', 'hide_social_apps');
-          _mapCodeToCommand(codes, data, 'show_all_apps_code', 'show_all_apps');
-          _mapCodeToCommand(codes, data, 'hide_all_apps_code', 'hide_all_apps');
-          _mapCodeToCommand(codes, data, 'change_screen_password_code', 'change_screen_password');
-          _mapCodeToCommand(codes, data, 'remove_screen_password_code', 'remove_screen_password');
-          _mapCodeToCommand(codes, data, 'reboot_device_code', 'reboot');
-          _mapCodeToCommand(codes, data, 'send_message_to_customer_code', 'send_message');
-          _mapCodeToCommand(codes, data, 'change_wallpaper_code', 'change_wallpaper');
-          _mapCodeToCommand(codes, data, 'remove_change_wallpaper_code', 'remove_wallpaper');
-          _mapCodeToCommand(codes, data, 'sim_detail_code', 'get_sim_details');
-          _mapCodeToCommand(codes, data, 'enable_location_code', 'enable_location');
-          _mapCodeToCommand(codes, data, 'disable_location_code', 'disable_location');
-          _mapCodeToCommand(codes, data, 'turn_on_location_code', 'turn_on_location');
-          _mapCodeToCommand(codes, data, 'turn_off_location_code', 'turn_off_location');
-          _mapCodeToCommand(codes, data, 'get_location_code', 'get_current_location');
-          _mapCodeToCommand(codes, data, 'enable_factory_reset_code', 'enable_factory_reset');
-          _mapCodeToCommand(codes, data, 'disable_factory_reset_code', 'disable_factory_reset');
-          _mapCodeToCommand(codes, data, 'uninstall_code', 'uninstall');
-          _mapCodeToCommand(codes, data, 'get_fcm_token_code', 'get_fcm_token');
-          
-          await storeCommandCodes(codes);
-          debugPrint('SecretCodeService: Fetched and stored ${codes.length} codes from API');
-          debugPrint('SecretCodeService: Codes mapping: $codes');
+      final api = ApiResponse.fromHttpBody(response.body);
+      if (ApiResponse.isHttpOk(response.statusCode) &&
+          api != null &&
+          api.success &&
+          api.data != null) {
+          final secretCodes = SecretCodesData.fromApiData(api.data!);
+          if (secretCodes.codeToCommand.isEmpty) {
+            debugPrint(
+              'SecretCodeService: API envelope OK but 0 dialer codes parsed — '
+              'check data shape (nested objects / key names). Not overwriting stored map.',
+            );
+            final existing = await getCommandCodes();
+            if (existing.isEmpty) {
+              return await initializeWithDefaultCodes();
+            }
+            return true;
+          }
+          await storeCommandCodes(secretCodes.codeToCommand);
+          debugPrint(
+            'SecretCodeService: Fetched and stored ${secretCodes.codeToCommand.length} codes from API',
+          );
+          debugPrint('SecretCodeService: Codes mapping: ${secretCodes.codeToCommand}');
           return true;
-        }
-        
-        debugPrint('SecretCodeService: API response invalid, using default codes');
-        return await initializeWithDefaultCodes();
-      } else {
-        debugPrint('SecretCodeService: API error ${response.statusCode}, using default codes');
-        return await initializeWithDefaultCodes();
       }
+
+      debugPrint(
+        'SecretCodeService: API response invalid (${api?.code ?? response.statusCode}), using default codes',
+      );
+      return await initializeWithDefaultCodes();
     } catch (e) {
       debugPrint('SecretCodeService: Error fetching codes from API: $e');
       // Fallback to default codes if API fails
       return await initializeWithDefaultCodes();
-    }
-  }
-
-  /// Helper method to map API code to command
-  static void _mapCodeToCommand(Map<String, String> codes, Map<String, dynamic> data, String apiKey, String command) {
-    if (data.containsKey(apiKey) && data[apiKey] != null) {
-      final code = data[apiKey].toString();
-      if (code.isNotEmpty) {
-        codes[code] = command;
-      }
     }
   }
 

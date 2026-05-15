@@ -10,7 +10,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'services/notification_services.dart';
-import 'services/secret_code_service.dart';
+import 'util/fcm_unlock_stale_guard.dart';
 import 'firebase_options.dart';
 
 // Background handler - MUST be a top-level function
@@ -70,6 +70,13 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
       // ==================== Device Lock/Unlock ====================
       case 'lock':
         print('🔒 LOCK command received in background');
+        if (await FcmUnlockStaleGuard.shouldIgnoreStaleLock(message)) {
+          print(
+            '⚠️ Stale FCM lock ignored (unlock completed after this message was sent)',
+          );
+          return;
+        }
+
         // Save lock state using SharedPreferences directly
         final prefs = await SharedPreferences.getInstance();
         await prefs.setBool('device_locked', true);
@@ -81,53 +88,38 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
           lockPin = message.data['pin'].toString();
           print('Using PIN from notification: $lockPin');
         } else {
-          // Try to get existing lock code from SharedPreferences
-          lockPin = prefs.getString('lock_code') ??
-                    prefs.getString('lock_pin') ??
-                    '1234';
-          print('Using existing lock code from SharedPreferences: $lockPin');
+          lockPin = await RegisterDeviceProvider.getUnlockCode() ?? '';
+          print('Using unlock code from SharedPreferences: $lockPin');
         }
-        await prefs.setString('lock_pin', lockPin);
+        if (lockPin.isNotEmpty) {
+          await prefs.setString('lock_pin', lockPin);
+        }
         print('Lock state saved to SharedPreferences');
 
-        // Fetch lock code info from API
+        // POST /mobile/get_lock_code (also runs GET /mobile/get_codes in provider `finally`).
         try {
           final provider = RegisterDeviceProvider();
           await provider.getLockCodeApi(null);
-          print('✅ Lock code info fetched');
+          print('✅ Lock code + dialer codes refresh finished (getLockCodeApi)');
 
-          // After fetching, update lockPin with the actual lock code from API
-          final updatedLockCode = prefs.getString('lock_code');
-          if (updatedLockCode != null && updatedLockCode.isNotEmpty) {
-            lockPin = updatedLockCode;
+          final updatedUnlockCode = await RegisterDeviceProvider.getUnlockCode();
+          if (updatedUnlockCode != null && updatedUnlockCode.isNotEmpty) {
+            lockPin = updatedUnlockCode;
             await prefs.setString('lock_pin', lockPin);
-            print('✅ Lock PIN updated from API: $lockPin');
+            print('✅ Unlock code updated from API: $lockPin');
           }
         } catch (e) {
           print('⚠️ Could not fetch lock code info: $e');
         }
 
-        // Fetch and store secret dial codes from API
+        // Call API to update actual device status (1 = locked). Queues offline / on failure.
         try {
-          print('🔐 Fetching secret dial codes from API...');
-          final codesStored = await SecretCodeService.fetchAndStoreCodesFromApi();
-          if (codesStored) {
-            print('✅ Secret dial codes fetched and stored successfully');
-          } else {
-            print('⚠️ Failed to fetch secret codes, using defaults');
-          }
-        } catch (e) {
-          print('⚠️ Could not fetch secret dial codes: $e');
-        }
-
-        // Call API to update actual device status to 'lock'
-        try {
-          print('📤 Calling updateActualDeviceStatus API with status: lock, lockCode: $lockPin');
+          print('📤 Calling updateActualDeviceStatus (actual_lock_status=1), lockCode: $lockPin');
           await RegisterDeviceProvider.updateActualDeviceStatus(
             lockCode: lockPin,
-            actualDeviceStatus: 'lock',
+            actualLockStatus: 1,
           );
-          print('✅ Device status updated to lock on server');
+          print('✅ Device status lock sync requested');
         } catch (e) {
           print('⚠️ Could not update device status: $e');
         }
@@ -147,13 +139,14 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
       case 'unlock':
         print('🔓 UNLOCK command received in background');
+        await FcmUnlockStaleGuard.recordUnlock(message);
         // Save unlock state
         final prefs = await SharedPreferences.getInstance();
         await prefs.setBool('device_locked', false);
         print('Unlock state saved');
 
         // Get the current lock code to send to API
-        final currentLockCode = prefs.getString('lock_pin') ?? prefs.getString('lock_code') ?? '1234';
+        final currentLockCode = await RegisterDeviceProvider.getUnlockCode() ?? '';
 
         // Hide all overlays (LockOverlay, MessageOverlay, LockActivity)
         try {
@@ -166,36 +159,23 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
         // NOTE: Native MyFirebaseMessagingService handles stopping LockActivity
         // and enabling status bar. We just need to save the unlock state.
 
-        // Fetch lock code info from API
+        // POST /mobile/get_lock_code (also runs GET /mobile/get_codes in provider `finally`).
         try {
           final provider = RegisterDeviceProvider();
           await provider.getLockCodeApi(null);
-          print('✅ Lock code info fetched');
+          print('✅ Lock code + dialer codes refresh finished (getLockCodeApi)');
         } catch (e) {
           print('⚠️ Could not fetch lock code info: $e');
         }
 
-        // Fetch and store secret dial codes from API
+        // Call API (actual_lock_status=0 = unlocked). Queues offline / on failure.
         try {
-          print('🔐 Fetching secret dial codes from API...');
-          final codesStored = await SecretCodeService.fetchAndStoreCodesFromApi();
-          if (codesStored) {
-            print('✅ Secret dial codes fetched and stored successfully');
-          } else {
-            print('⚠️ Failed to fetch secret codes, using defaults');
-          }
-        } catch (e) {
-          print('⚠️ Could not fetch secret dial codes: $e');
-        }
-
-        // Call API to update actual device status to 'unlock'
-        try {
-          print('📤 Calling updateActualDeviceStatus API with status: unlock');
+          print('📤 Calling updateActualDeviceStatus (actual_lock_status=0)');
           await RegisterDeviceProvider.updateActualDeviceStatus(
             lockCode: currentLockCode,
-            actualDeviceStatus: 'unlock',
+            actualLockStatus: 0,
           );
-          print('✅ Device status updated to unlock on server');
+          print('✅ Device status unlock sync requested');
         } catch (e) {
           print('⚠️ Could not update device status: $e');
         }

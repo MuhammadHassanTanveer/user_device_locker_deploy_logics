@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 
@@ -6,7 +7,10 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../util/app_constants.dart';
+import '../models/mobile_api_models.dart';
+import '../services/secret_code_service.dart';
+import '../util/api_response.dart';
+import '../util/mobile_api_endpoints.dart';
 import '../widgets/snackbar_widget.dart';
 
 
@@ -16,10 +20,18 @@ class RegisterDeviceProvider with ChangeNotifier{
   static const String _imei1Key = 'device_imei1';
   static const String _imei2Key = 'device_imei2';
   static const String _serialNoKey = 'device_serial_no';
+  static const String _customerNameKey = 'customer_name';
+  static const String _customerCodeKey = 'customer_code';
+  static const String _mobileModelKey = 'mobile_model';
+  static const String _isActiveKey = 'customer_is_active';
 
-  // Lock code related keys
+  // Unlock code related keys (lock_code / lock_pin kept for native compatibility)
+  static const String _unlockCodeKey = 'unlock_code';
   static const String _lockCodeKey = 'lock_code';
+  static const String _lockPinKey = 'lock_pin';
+  static const String _lockStatusKey = 'lock_status';
   static const String _retailerIdKey = 'retailer_id';
+  static const String _retailerCompanyCodeKey = 'retailer_company_code';
   static const String _retailerPhoneKey = 'retailer_phone';
   static const String _retailerNameKey = 'retailer_name';
   static const String _retailerNameUrduKey = 'retailer_name_urdu';
@@ -30,24 +42,44 @@ class RegisterDeviceProvider with ChangeNotifier{
 
   bool isLoading = false;
 
+  static ApiResponse? _readApiResponse(http.Response response, {String? logLabel}) {
+    if (logLabel != null) {
+      debugPrint('$logLabel status=${response.statusCode} body=${response.body}');
+    }
+    return ApiResponse.fromHttpBody(response.body);
+  }
+
+  static Future<Map<String, dynamic>?> _buildImeiRequestBody() async {
+    final imei1 = await getImei1() ?? '';
+    final imei2 = await getImei2() ?? '';
+    if (imei1.isEmpty) return null;
+
+    final body = <String, dynamic>{'imei_1': imei1};
+    if (imei2.isNotEmpty) {
+      body['imei_2'] = imei2;
+    }
+    return body;
+  }
+
   Future<bool> registerDeviceApi(context, {
-    required String imei_no1,
-    required String imei_no2,
-    required String serial_no,
+    required String imei_1,
+    required String imei_2,
     required String fcm_token,
+    required bool isDualImei,
   })
   async {
 
 
     try {
-      final url = Uri.parse('${AppConstants.baseUrl}/update_device_status_api');
+      final url = Uri.parse(MobileApiEndpoints.url(MobileApiEndpoints.registerDevice));
 
       final Map<String, dynamic> body = {
-        "imei_no1": imei_no1,
-        "imei_no2": imei_no2,
-        "serial_no": serial_no,
+        "imei_1": imei_1,
         "fcm_token": fcm_token,
       };
+      if (isDualImei) {
+        body["imei_2"] = imei_2;
+      }
       final response = await http.post(
         url,
         headers: {
@@ -57,38 +89,53 @@ class RegisterDeviceProvider with ChangeNotifier{
         body: jsonEncode(body),
       );
 
-      if (response.statusCode == 200) {
-        debugPrint('updateUser api is working ${response.body}');
-        final responseData = jsonDecode(response.body);
-        if (responseData['success'] == true) {
-          // Store device ID in SharedPreferences
-          final userId = responseData['data']['id'];
-          await _saveUserId(userId);
-          debugPrint('Device ID saved: $userId');
-
-          // Store IMEI numbers in SharedPreferences
-          await _saveImeiNumbers(imei_no1, imei_no2, serial_no);
-          debugPrint('IMEI numbers saved: IMEI1=$imei_no1, IMEI2=$imei_no2');
-
-          showCustomSnackBar(context, "Updated successfully", isError: false);
-          return true;
-        } else {
-          isLoading = false;
-          showCustomSnackBar(context, responseData['message'] ?? "Failed to update user");
-          return false;
-        }
-      } else {
-        // Handle error responses (400, 401, etc.)
-        debugPrint('updateUserEx ${response.statusCode} ${response.body}');
-        try {
-          final errorData = jsonDecode(response.body);
-          final errorMessage = errorData['message'] ?? 'Failed to register device';
-          showCustomSnackBar(context, errorMessage);
-        } catch (e) {
-          showCustomSnackBar(context, 'Failed to register device');
-        }
+      final api = _readApiResponse(response, logLabel: 'registerdevice');
+      if (!ApiResponse.isHttpOk(response.statusCode) || api == null) {
+        showCustomSnackBar(
+          context,
+          api?.message ?? 'Failed to register device',
+        );
         return false;
       }
+
+      if (api.success) {
+        final data = api.data;
+        if (data == null) {
+          showCustomSnackBar(context, 'Invalid server response: missing data');
+          return false;
+        }
+
+        final registration = RegisterDeviceData.fromJson(data);
+        if (registration.customerId == 0) {
+          debugPrint('❌ Registration response missing customer_id: $data');
+          showCustomSnackBar(
+            context,
+            'Invalid server response: missing customer ID',
+          );
+          return false;
+        }
+
+        await _saveRegistrationData(registration);
+        debugPrint(
+          'Registration saved: id=${registration.customerId}, '
+          'name=${registration.customerName}, code=${registration.customerCode}',
+        );
+
+        await _saveImeiNumbers(imei_1, isDualImei ? imei_2 : '');
+        debugPrint('IMEI numbers saved: IMEI1=$imei_1, IMEI2=${isDualImei ? imei_2 : ''}');
+
+        showCustomSnackBar(
+          context,
+          api.message?.isNotEmpty == true
+              ? api.message!
+              : 'Device registered successfully',
+          isError: false,
+        );
+        return true;
+      }
+
+      showCustomSnackBar(context, api.message ?? 'Failed to register device');
+      return false;
     } catch (error) {
       debugPrint('Error updating user $error');
       showCustomSnackBar(context, 'Network error. Please try again.');
@@ -100,7 +147,7 @@ class RegisterDeviceProvider with ChangeNotifier{
   }
 
   /// Save IMEI numbers to SharedPreferences
-  Future<void> _saveImeiNumbers(String imei1, String imei2, String serialNo) async {
+  Future<void> _saveImeiNumbers(String imei1, String imei2) async {
     final prefs = await SharedPreferences.getInstance();
 
     // Save IMEI1 if not empty
@@ -111,11 +158,8 @@ class RegisterDeviceProvider with ChangeNotifier{
     // Save IMEI2 if not empty (for dual SIM devices)
     if (imei2.isNotEmpty) {
       await prefs.setString(_imei2Key, imei2);
-    }
-
-    // Save serial number
-    if (serialNo.isNotEmpty) {
-      await prefs.setString(_serialNoKey, serialNo);
+    } else {
+      await prefs.remove(_imei2Key);
     }
   }
 
@@ -123,6 +167,30 @@ class RegisterDeviceProvider with ChangeNotifier{
   Future<void> _saveUserId(int userId) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_userIdKey, userId);
+  }
+
+  Future<void> _saveRegistrationData(RegisterDeviceData data) async {
+    await _saveUserId(data.customerId);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_customerNameKey, data.customerName);
+    await prefs.setString(_customerCodeKey, data.customerCode);
+    await prefs.setString(_mobileModelKey, data.mobileModel);
+    await prefs.setInt(_isActiveKey, data.isActive);
+  }
+
+  /// Get stored customer profile from SharedPreferences
+  static Future<CustomerProfile?> getCustomerProfile() async {
+    final prefs = await SharedPreferences.getInstance();
+    final customerId = prefs.getInt(_userIdKey);
+    if (customerId == null) return null;
+
+    return CustomerProfile(
+      customerId: customerId,
+      customerName: prefs.getString(_customerNameKey) ?? '',
+      customerCode: prefs.getString(_customerCodeKey) ?? '',
+      mobileModel: prefs.getString(_mobileModelKey) ?? '',
+      isActive: prefs.getInt(_isActiveKey) ?? 0,
+    );
   }
 
   /// Get stored device ID from SharedPreferences
@@ -180,10 +248,19 @@ class RegisterDeviceProvider with ChangeNotifier{
     await prefs.remove(_imei1Key);
     await prefs.remove(_imei2Key);
     await prefs.remove(_serialNoKey);
+    await prefs.remove(_customerNameKey);
+    await prefs.remove(_customerCodeKey);
+    await prefs.remove(_mobileModelKey);
+    await prefs.remove(_isActiveKey);
   }
 
-  /// Get lock code from API using stored IMEIs
-  /// [context] can be null when called from background
+  /// POST `/mobile/get_lock_code` using stored IMEIs.
+  ///
+  /// Always runs [SecretCodeService.fetchAndStoreCodesFromApi] (GET `/mobile/get_codes`) in a
+  /// `finally` block so every caller refreshes dialer codes — including the FCM background
+  /// isolate, foreground notification handlers, Welcome screen, etc.
+  ///
+  /// [context] can be null (e.g. background / notification).
   Future<bool> getLockCodeApi(dynamic context) async {
     debugPrint('🔑🔑🔑 getLockCodeApi CALLED 🔑🔑🔑');
     isLoading = true;
@@ -205,13 +282,15 @@ class RegisterDeviceProvider with ChangeNotifier{
         return false;
       }
 
-      final url = Uri.parse('${AppConstants.baseUrl}/get_lock_code');
+      final url = Uri.parse(MobileApiEndpoints.url(MobileApiEndpoints.getLockCode));
       debugPrint('🔑 API URL: $url');
 
       final Map<String, dynamic> body = {
-        "imei_no1": imei1,
-        "imei_no2": imei2,
+        "imei_1": imei1,
       };
+      if (imei2.isNotEmpty) {
+        body["imei_2"] = imei2;
+      }
       debugPrint('🔑 Request body: $body');
       debugPrint('🔑 Making HTTP POST request...');
 
@@ -225,69 +304,75 @@ class RegisterDeviceProvider with ChangeNotifier{
       );
       debugPrint('🔑 Response status code: ${response.statusCode}');
 
-      if (response.statusCode == 200) {
-        debugPrint('getLockCodeApi response: ${response.body}');
-        final responseData = jsonDecode(response.body);
-
-        if (responseData['success'] == true) {
-          // API returns 'Data' with capital D
-          final data = responseData['Data'];
-
-          // Store lock code information in SharedPreferences
-          // Mapping API fields: retailer_id, lock_code, phone_no, name, name_urdu
-          // Note: Need to handle null values properly - data['field']?.toString() on null returns "null" string
-          final retailerId = data['retailer_id'];
-          final lockCode = data['lock_code'];
-          final phoneNo = data['phone_no'];
-          final name = data['name'];
-          final nameUrdu = data['name_urdu'];
-
-          await _saveLockCodeInfo(
-            lockCode: lockCode != null ? lockCode.toString() : '',
-            retailerId: retailerId != null ? retailerId.toString() : '',
-            retailerPhone: phoneNo != null ? phoneNo.toString() : '',
-            retailerName: name != null ? name.toString() : '',
-            retailerNameUrdu: nameUrdu != null ? nameUrdu.toString() : '',
-          );
-
-          debugPrint('✅ Lock code info saved successfully');
-          debugPrint('   Retailer ID: $retailerId');
-          debugPrint('   Lock Code: $lockCode');
-          debugPrint('   Phone: $phoneNo');
-          debugPrint('   Name: $name');
-          debugPrint('   Name Urdu: $nameUrdu');
-
-          // Verify saved data
-          final savedLockCode = await getLockCode();
-          final savedRetailerId = await getRetailerId();
-          debugPrint('   Verified saved lock code: $savedLockCode');
-          debugPrint('   Verified saved retailer ID: $savedRetailerId');
-
-          if (context != null) {
-            showCustomSnackBar(context, "Lock code retrieved successfully", isError: false);
-          }
-          return true;
-        } else {
-          if (context != null) {
-            showCustomSnackBar(context, responseData['message'] ?? "Failed to get lock code");
-          }
-          return false;
-        }
-      } else {
-        debugPrint('getLockCodeApi error: ${response.statusCode} ${response.body}');
-        try {
-          final errorData = jsonDecode(response.body);
-          final errorMessage = errorData['message'] ?? 'Failed to get lock code';
-          if (context != null) {
-            showCustomSnackBar(context, errorMessage);
-          }
-        } catch (e) {
-          if (context != null) {
-            showCustomSnackBar(context, 'Failed to get lock code');
-          }
+      final api = _readApiResponse(response, logLabel: 'get_lock_code');
+      if (!ApiResponse.isHttpOk(response.statusCode) || api == null) {
+        if (context != null) {
+          showCustomSnackBar(context, api?.message ?? 'Failed to get lock code');
         }
         return false;
       }
+
+      if (api.success) {
+        final data = api.data;
+        if (data == null) {
+          debugPrint('❌ get_lock_code missing data: ${response.body}');
+          if (context != null) {
+            showCustomSnackBar(context, 'Invalid server response: missing lock code data');
+          }
+          return false;
+        }
+
+        final unlockData = UnlockCodeData.fromJson(data);
+
+        if (unlockData.unlockCode.isEmpty) {
+          if (context != null) {
+            showCustomSnackBar(context, 'Invalid server response: missing unlock code');
+          }
+          return false;
+        }
+
+        await _saveUnlockCode(unlockData.unlockCode, lockStatus: unlockData.lockStatus);
+
+        await _saveRetailerPrefsFromUnlockData(unlockData);
+
+        if (unlockData.customerId > 0) {
+          await _saveRegistrationData(
+            RegisterDeviceData(
+              customerId: unlockData.customerId,
+              customerName: unlockData.customerName,
+              customerCode: unlockData.customerCode,
+              mobileModel: (await getCustomerProfile())?.mobileModel ?? '',
+              isActive: (await getCustomerProfile())?.isActive ?? 1,
+            ),
+          );
+        }
+
+        debugPrint('✅ Unlock code saved successfully');
+        debugPrint('   Customer ID: ${unlockData.customerId}');
+        debugPrint('   Unlock Code: ${unlockData.unlockCode}');
+        debugPrint('   Lock Status: ${unlockData.lockStatus}');
+        debugPrint(
+          '   Retailer: id=${unlockData.retailerId} '
+          'code=${unlockData.retailerCode} name=${unlockData.retailerName} '
+          'urdu=${unlockData.retailerNameUrdu} phone=${unlockData.retailerPhone}',
+        );
+
+        if (context != null) {
+          showCustomSnackBar(
+            context,
+            api.message?.isNotEmpty == true
+                ? api.message!
+                : 'Lock code retrieved successfully',
+            isError: false,
+          );
+        }
+        return true;
+      }
+
+      if (context != null) {
+        showCustomSnackBar(context, api.message ?? 'Failed to get lock code');
+      }
+      return false;
     } catch (error) {
       debugPrint('Error getting lock code: $error');
       if (context != null) {
@@ -297,58 +382,113 @@ class RegisterDeviceProvider with ChangeNotifier{
     } finally {
       isLoading = false;
       notifyListeners();
+      try {
+        await SecretCodeService.fetchAndStoreCodesFromApi();
+        debugPrint('🔐 get_codes refreshed after get_lock_code flow');
+      } catch (e) {
+        debugPrint('🔐 get_codes refresh after get_lock_code failed: $e');
+      }
     }
   }
 
-  /// Save lock code information to SharedPreferences
-  /// This REPLACES all existing lock code info with fresh data from API
-  Future<void> _saveLockCodeInfo({
-    required String lockCode,
-    required String retailerId,
-    required String retailerPhone,
-    required String retailerName,
-    String retailerNameUrdu = '',
+  /// Save retailer / company rows for native LockActivity (prefs match flutter.* prefix).
+  static Future<void> _saveRetailerPrefsFromUnlockData(UnlockCodeData d) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    if (d.retailerId.isNotEmpty) {
+      await prefs.setString(_retailerIdKey, d.retailerId);
+    }
+    if (d.retailerCode.isNotEmpty) {
+      await prefs.setString(_retailerCompanyCodeKey, d.retailerCode);
+    }
+    if (d.retailerName.isNotEmpty) {
+      await prefs.setString(_retailerNameKey, d.retailerName);
+    }
+    if (d.retailerNameUrdu.isNotEmpty) {
+      await prefs.setString(_retailerNameUrduKey, d.retailerNameUrdu);
+    }
+    if (d.retailerPhone.isNotEmpty) {
+      await prefs.setString(_retailerPhoneKey, d.retailerPhone);
+    }
+  }
+
+  /// Generate a random 6-digit unlock code (digits only).
+  static String generateUnlockCode() {
+    final random = Random.secure();
+    return (100000 + random.nextInt(900000)).toString();
+  }
+
+  /// Save unlock code to SharedPreferences (syncs native keys).
+  static Future<void> _saveUnlockCode(
+    String unlockCode, {
+    bool? lockStatus,
   }) async {
     final prefs = await SharedPreferences.getInstance();
-
-    // IMPORTANT: Clear old values first to ensure we're using ONLY the latest data
-    await prefs.remove(_lockCodeKey);
-    await prefs.remove(_retailerIdKey);
-    await prefs.remove(_retailerPhoneKey);
-    await prefs.remove(_retailerNameKey);
-    await prefs.remove(_retailerNameUrduKey);
-
-    debugPrint('🔑 Cleared old lock code info from SharedPreferences');
-
-    // Save new values (even if empty, we clear old values first)
-    if (lockCode.isNotEmpty) {
-      await prefs.setString(_lockCodeKey, lockCode);
-
-      // IMPORTANT: Also sync the lock_pin in SharedPreferences
-      // This ensures both 'lock_code' and 'lock_pin' are in sync
-      // The native LockActivity can use either one and get the same (latest) value
-      await prefs.setString('lock_pin', lockCode);
-      debugPrint('🔑 Synced lock_pin with lock_code: $lockCode');
+    await prefs.setString(_unlockCodeKey, unlockCode);
+    await prefs.setString(_lockCodeKey, unlockCode);
+    await prefs.setString(_lockPinKey, unlockCode);
+    if (lockStatus != null) {
+      await prefs.setBool(_lockStatusKey, lockStatus);
     }
-    if (retailerId.isNotEmpty) {
-      await prefs.setString(_retailerIdKey, retailerId);
-    }
-    if (retailerPhone.isNotEmpty) {
-      await prefs.setString(_retailerPhoneKey, retailerPhone);
-    }
-    if (retailerName.isNotEmpty) {
-      await prefs.setString(_retailerNameKey, retailerName);
-    }
-    if (retailerNameUrdu.isNotEmpty) {
-      await prefs.setString(_retailerNameUrduKey, retailerNameUrdu);
+    debugPrint('🔑 Unlock code saved: $unlockCode');
+  }
+
+  /// `POST /mobile/update_unlock_code`
+  static Future<bool> updateUnlockCodeApi(String unlockCode) async {
+    debugPrint('🔑 updateUnlockCodeApi: $unlockCode');
+
+    try {
+      final imeiBody = await _buildImeiRequestBody();
+      if (imeiBody == null) {
+        debugPrint('❌ IMEI 1 missing - cannot update unlock code');
+        return false;
+      }
+
+      final url = Uri.parse(
+        MobileApiEndpoints.url(MobileApiEndpoints.updateUnlockCode),
+      );
+
+      final body = <String, dynamic>{
+        ...imeiBody,
+        'unlock_code': unlockCode,
+      };
+
+      final response = await http.post(
+        url,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: jsonEncode(body),
+      );
+
+      final api = _readApiResponse(response, logLabel: 'update_unlock_code');
+      if (!ApiResponse.isHttpOk(response.statusCode) || api == null) {
+        return false;
+      }
+
+      if (api.success) {
+        await _saveUnlockCode(unlockCode);
+        return true;
+      }
+      return false;
+    } catch (e) {
+      debugPrint('❌ Error updating unlock code: $e');
+      return false;
     }
   }
 
-  /// Get stored lock code from SharedPreferences
-  static Future<String?> getLockCode() async {
+  /// Get stored unlock code from SharedPreferences.
+  static Future<String?> getUnlockCode() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_lockCodeKey);
+    await prefs.reload();
+    return prefs.getString(_unlockCodeKey) ??
+        prefs.getString(_lockCodeKey) ??
+        prefs.getString(_lockPinKey);
   }
+
+  /// Backward-compatible alias.
+  static Future<String?> getLockCode() => getUnlockCode();
 
   /// Get stored retailer ID from SharedPreferences
   static Future<String?> getRetailerId() async {
@@ -377,11 +517,12 @@ class RegisterDeviceProvider with ChangeNotifier{
   /// Get all lock code info as a map
   static Future<Map<String, String?>> getLockCodeInfo() async {
     final prefs = await SharedPreferences.getInstance();
-    // Reload to get fresh data (important for overlay isolate)
     await prefs.reload();
     return {
+      'unlock_code': await getUnlockCode(),
       'lock_code': prefs.getString(_lockCodeKey),
       'retailer_id': prefs.getString(_retailerIdKey),
+      'retailer_company_code': prefs.getString(_retailerCompanyCodeKey),
       'retailer_phone': prefs.getString(_retailerPhoneKey),
       'retailer_name': prefs.getString(_retailerNameKey),
       'retailer_name_urdu': prefs.getString(_retailerNameUrduKey),
@@ -393,6 +534,7 @@ class RegisterDeviceProvider with ChangeNotifier{
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_lockCodeKey);
     await prefs.remove(_retailerIdKey);
+    await prefs.remove(_retailerCompanyCodeKey);
     await prefs.remove(_retailerPhoneKey);
     await prefs.remove(_retailerNameKey);
     await prefs.remove(_retailerNameUrduKey);
@@ -411,19 +553,17 @@ class RegisterDeviceProvider with ChangeNotifier{
     debugPrint('   Latitude: $latitude, Longitude: $longitude, Accuracy: $accuracy');
 
     try {
-      // Get customer_id (user_id) from SharedPreferences
-      final customerId = await getUserId();
-
-      if (customerId == null) {
-        debugPrint('❌ Customer ID is null - cannot send location');
+      final imeiBody = await _buildImeiRequestBody();
+      if (imeiBody == null) {
+        debugPrint('❌ IMEI 1 is missing - cannot send location');
         return false;
       }
 
-      final url = Uri.parse('${AppConstants.baseUrl}/update_location');
+      final url = Uri.parse(MobileApiEndpoints.url(MobileApiEndpoints.updateLocation));
       debugPrint('📍 API URL: $url');
 
       final Map<String, dynamic> body = {
-        "customer_id": customerId,
+        ...imeiBody,
         "latitude": latitude.toString(),
         "longitude": longitude.toString(),
       };
@@ -440,29 +580,45 @@ class RegisterDeviceProvider with ChangeNotifier{
       debugPrint('📍 Response status code: ${response.statusCode}');
       debugPrint('📍 Response body: ${response.body}');
 
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        if (responseData['success'] == true) {
-          debugPrint('✅ Location sent successfully');
-          if (context != null) {
-            showCustomSnackBar(context, "Location sent successfully", isError: false);
-          }
-          return true;
-        } else {
-          debugPrint('❌ Location API returned success: false');
-          if (context != null) {
-            showCustomSnackBar(context, responseData['message'] ?? "Failed to send location");
-          }
-          return false;
-        }
-      } else {
+      final api = _readApiResponse(response, logLabel: 'update_location');
+      if (!ApiResponse.isHttpOk(response.statusCode) || api == null) {
         debugPrint('❌ Location API error: ${response.statusCode}');
         return false;
       }
+
+      if (api.success) {
+        debugPrint('✅ Location sent successfully');
+        if (context != null) {
+          showCustomSnackBar(
+            context,
+            api.message?.isNotEmpty == true
+                ? api.message!
+                : 'Location sent successfully',
+            isError: false,
+          );
+        }
+        return true;
+      }
+
+      debugPrint('❌ Location API returned success: false — ${api.message}');
+      if (context != null) {
+        showCustomSnackBar(context, api.message ?? 'Failed to send location');
+      }
+      return false;
     } catch (error) {
       debugPrint('❌ Error sending location: $error');
       return false;
     }
+  }
+
+  /// 1 = device locked, 0 = unlocked. Accepts legacy pending JSON (strings).
+  static int _lockStatusToInt(Object? raw) {
+    if (raw == null) return 0;
+    if (raw is int) return raw == 1 ? 1 : 0;
+    if (raw is double) return raw.toInt() == 1 ? 1 : 0;
+    final s = raw.toString().toLowerCase().trim();
+    if (s == '1' || s == 'lock' || s == 'locked' || s == 'true') return 1;
+    return 0;
   }
 
   /// Check if device has internet connectivity
@@ -479,24 +635,24 @@ class RegisterDeviceProvider with ChangeNotifier{
     }
   }
 
-  /// Update actual device status API
-  /// This is called when the lock code changes after unlock
-  /// If no internet, it stores the data locally and syncs when online
+  /// Update actual device status API (`actual_lock_status`: **1** = locked, **0** = unlocked).
+  /// If offline or the request fails, stores IMEIs + status locally and syncs when online.
   static Future<bool> updateActualDeviceStatus({
     required String lockCode,
-    String actualDeviceStatus = 'unlock',
+    int actualLockStatus = 0,
   }) async {
     debugPrint('🔄🔄🔄 updateActualDeviceStatus CALLED 🔄🔄🔄');
     debugPrint('   Lock Code: $lockCode');
-    debugPrint('   Status: $actualDeviceStatus');
+    debugPrint('   actual_lock_status: $actualLockStatus');
 
     try {
-      // Get user ID (customer_id) from SharedPreferences
-      final userId = await getUserId();
-      if (userId == null) {
-        debugPrint('❌ User ID not found - cannot update device status');
+      final imeiBody = await _buildImeiRequestBody();
+      if (imeiBody == null) {
+        debugPrint('❌ IMEI 1 not found - cannot update device status');
         return false;
       }
+
+      final statusInt = actualLockStatus == 1 ? 1 : 0;
 
       // Check internet connectivity
       final hasInternet = await hasInternetConnection();
@@ -505,23 +661,32 @@ class RegisterDeviceProvider with ChangeNotifier{
       if (hasInternet) {
         // Online: Make API call directly
         final success = await _makeUpdateDeviceStatusApiCall(
-          customerId: userId,
-          lockCode: lockCode,
-          actualDeviceStatus: actualDeviceStatus,
+          imei1: imeiBody['imei_1'] as String,
+          imei2: imeiBody['imei_2'] as String? ?? '',
+          actualLockStatus: statusInt,
         );
 
         if (success) {
           // Clear any pending sync data since we successfully synced
           await _clearPendingDeviceStatusSync();
+          return true;
         }
-        return success;
+
+        debugPrint('⚠️ API failed while online - saving for later sync');
+        await _savePendingDeviceStatusSync(
+          imei1: imeiBody['imei_1'] as String,
+          imei2: imeiBody['imei_2'] as String? ?? '',
+          actualLockStatus: statusInt,
+        );
+        _startConnectivityListener();
+        return false;
       } else {
         // Offline: Store data locally for later sync
         debugPrint('📴 No internet - storing for later sync');
         await _savePendingDeviceStatusSync(
-          customerId: userId,
-          lockCode: lockCode,
-          actualDeviceStatus: actualDeviceStatus,
+          imei1: imeiBody['imei_1'] as String,
+          imei2: imeiBody['imei_2'] as String? ?? '',
+          actualLockStatus: statusInt,
         );
 
         // Start listening for connectivity changes
@@ -536,19 +701,24 @@ class RegisterDeviceProvider with ChangeNotifier{
 
   /// Make the actual API call to update device status
   static Future<bool> _makeUpdateDeviceStatusApiCall({
-    required int customerId,
-    required String lockCode,
-    required String actualDeviceStatus,
+    required String imei1,
+    required String imei2,
+    required int actualLockStatus,
   }) async {
     try {
-      final url = Uri.parse('${AppConstants.baseUrl}/update_actual_device_status');
+      final url = Uri.parse(
+        MobileApiEndpoints.url(MobileApiEndpoints.updateActualDeviceStatus),
+      );
       debugPrint('🔄 API URL: $url');
 
+      final statusInt = actualLockStatus == 1 ? 1 : 0;
       final Map<String, dynamic> body = {
-        "customer_id": customerId,
-        "lock_code": lockCode,
-        "actual_device_status": actualDeviceStatus,
+        "imei_1": imei1,
+        "actual_lock_status": statusInt,
       };
+      if (imei2.isNotEmpty) {
+        body["imei_2"] = imei2;
+      }
       debugPrint('🔄 Request body: $body');
 
       final response = await http.post(
@@ -562,20 +732,19 @@ class RegisterDeviceProvider with ChangeNotifier{
       debugPrint('🔄 Response status code: ${response.statusCode}');
       debugPrint('🔄 Response body: ${response.body}');
 
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        if (responseData['success'] == true) {
-          debugPrint('✅ Device status updated successfully');
-          return true;
-        } else {
-          debugPrint('❌ Device status API returned success: false');
-          debugPrint('   Message: ${responseData['message']}');
-          return false;
-        }
-      } else {
+      final api = _readApiResponse(response, logLabel: 'update_actual_device_status');
+      if (!ApiResponse.isHttpOk(response.statusCode) || api == null) {
         debugPrint('❌ Device status API error: ${response.statusCode}');
         return false;
       }
+
+      if (api.success) {
+        debugPrint('✅ Device status updated successfully');
+        return true;
+      }
+
+      debugPrint('❌ Device status API returned success: false — ${api.message}');
+      return false;
     } catch (error) {
       debugPrint('❌ Error in API call: $error');
       return false;
@@ -584,15 +753,16 @@ class RegisterDeviceProvider with ChangeNotifier{
 
   /// Save pending device status sync data to SharedPreferences
   static Future<void> _savePendingDeviceStatusSync({
-    required int customerId,
-    required String lockCode,
-    required String actualDeviceStatus,
+    required String imei1,
+    required String imei2,
+    required int actualLockStatus,
   }) async {
     final prefs = await SharedPreferences.getInstance();
+    final statusInt = actualLockStatus == 1 ? 1 : 0;
     final pendingData = jsonEncode({
-      'customer_id': customerId,
-      'lock_code': lockCode,
-      'actual_device_status': actualDeviceStatus,
+      'imei_1': imei1,
+      'imei_2': imei2,
+      'actual_lock_status': statusInt,
       'timestamp': DateTime.now().toIso8601String(),
     });
     await prefs.setString(_pendingDeviceStatusSyncKey, pendingData);
@@ -641,11 +811,23 @@ class RegisterDeviceProvider with ChangeNotifier{
       return false;
     }
 
-    // Make API call with pending data
+    final imei1 = pendingData['imei_1'] as String? ??
+        (await getImei1() ?? '');
+    final imei2 = pendingData['imei_2'] as String? ??
+        (await getImei2() ?? '');
+    final actualLockStatus = _lockStatusToInt(
+      pendingData['actual_lock_status'] ?? pendingData['actual_device_status'],
+    );
+
+    if (imei1.isEmpty) {
+      debugPrint('   IMEI 1 missing in pending sync - cannot sync');
+      return false;
+    }
+
     final success = await _makeUpdateDeviceStatusApiCall(
-      customerId: pendingData['customer_id'] as int,
-      lockCode: pendingData['lock_code'] as String,
-      actualDeviceStatus: pendingData['actual_device_status'] as String,
+      imei1: imei1,
+      imei2: imei2,
+      actualLockStatus: actualLockStatus,
     );
 
     if (success) {
@@ -703,44 +885,65 @@ class RegisterDeviceProvider with ChangeNotifier{
 
   // ==================== Customer Status for Uninstall ====================
 
-  /// Update customer status to inactive (status=2) before uninstall
-  /// This is called when the uninstall command is received
-  /// If no internet, it saves the data for later sync
+  static const int _uninstallIsActiveStatus = 2;
+
+  /// Ensures JSON numeric fields are sent as int, not string.
+  static int _ensureInt(dynamic value, {int fallback = _uninstallIsActiveStatus}) {
+    if (value is int) return value;
+    if (value is double) return value.toInt();
+    if (value is String) return int.tryParse(value) ?? fallback;
+    return fallback;
+  }
+
+  /// Update customer is_active status before uninstall (is_active=2)
+  /// If no internet, saves data locally for later sync
   static Future<bool> updateCustomerStatusForUninstall() async {
     debugPrint('🗑️🗑️🗑️ updateCustomerStatusForUninstall CALLED 🗑️🗑️🗑️');
 
     try {
-      // Get user ID (customer_id) from SharedPreferences
-      final userId = await getUserId();
-      if (userId == null) {
-        debugPrint('❌ User ID not found - cannot update customer status');
+      final imeiBody = await _buildImeiRequestBody();
+      if (imeiBody == null) {
+        debugPrint('❌ IMEI 1 not found - cannot update customer status');
         return false;
       }
 
-      debugPrint('   Customer ID: $userId');
-      debugPrint('   Status: 2 (inactive)');
+      final imei1 = imeiBody['imei_1'] as String;
+      final imei2 = imeiBody['imei_2'] as String? ?? '';
 
-      // Check internet connectivity
+      debugPrint('   IMEI 1: $imei1');
+      if (imei2.isNotEmpty) debugPrint('   IMEI 2: $imei2');
+      debugPrint('   is_active: $_uninstallIsActiveStatus (inactive)');
+
       final hasInternet = await hasInternetConnection();
       debugPrint('   Has Internet: $hasInternet');
 
       if (hasInternet) {
-        // Online: Make API call directly
-        final success = await _makeUpdateCustomerStatusApiCall(customerId: userId);
-        
+        final success = await _makeUpdateCustomerStatusApiCall(
+          imei1: imei1,
+          imei2: imei2,
+          isActive: _uninstallIsActiveStatus,
+        );
+
         if (success) {
           debugPrint('✅ Customer status updated to inactive on server');
           await _clearPendingUninstallStatusSync();
           return true;
         } else {
           debugPrint('⚠️ API call failed - saving for later sync');
-          await _savePendingUninstallStatusSync(customerId: userId);
+          await _savePendingUninstallStatusSync(
+            imei1: imei1,
+            imei2: imei2,
+            isActive: _uninstallIsActiveStatus,
+          );
           return false;
         }
       } else {
-        // Offline: Save for later sync
         debugPrint('📴 No internet - saving customer status update for later sync');
-        await _savePendingUninstallStatusSync(customerId: userId);
+        await _savePendingUninstallStatusSync(
+          imei1: imei1,
+          imei2: imei2,
+          isActive: _uninstallIsActiveStatus,
+        );
         return false;
       }
     } catch (error) {
@@ -751,36 +954,43 @@ class RegisterDeviceProvider with ChangeNotifier{
 
   /// Make API call to update customer is_active status
   static Future<bool> _makeUpdateCustomerStatusApiCall({
-    required int customerId,
+    required String imei1,
+    required String imei2,
+    required int isActive,
   }) async {
     try {
       final url = Uri.parse(
-        '${AppConstants.baseUrl}/update_cutomer_is_active_status?customer_id=$customerId&status=2'
+        MobileApiEndpoints.url(MobileApiEndpoints.updateCustomerIsActiveStatus),
       );
       debugPrint('🌐 API URL: $url');
 
-      final response = await http.get(
+      final int activeStatus = _ensureInt(isActive);
+      final Map<String, dynamic> body = {
+        'imei_1': imei1,
+        'is_active': activeStatus,
+      };
+      if (imei2.isNotEmpty) {
+        body['imei_2'] = imei2;
+      }
+      debugPrint('🌐 Request body: $body');
+
+      final response = await http.post(
         url,
         headers: {
+          'Content-Type': 'application/json',
           'Accept': 'application/json',
         },
+        body: jsonEncode(body),
       );
       debugPrint('🌐 Response status code: ${response.statusCode}');
       debugPrint('🌐 Response body: ${response.body}');
 
-      if (response.statusCode == 200) {
-        try {
-          final responseData = jsonDecode(response.body);
-          return responseData['success'] == true;
-        } catch (e) {
-          // If response is not JSON, consider it successful if HTTP 200
-          debugPrint('Response is not JSON, considering successful based on HTTP 200');
-          return true;
-        }
-      } else {
+      final api = _readApiResponse(response, logLabel: 'update_customer_is_active_status');
+      if (!ApiResponse.isHttpOk(response.statusCode) || api == null) {
         debugPrint('❌ Customer status API error: ${response.statusCode}');
         return false;
       }
+      return api.success;
     } catch (error) {
       debugPrint('❌ Error in API call: $error');
       return false;
@@ -789,12 +999,15 @@ class RegisterDeviceProvider with ChangeNotifier{
 
   /// Save pending uninstall status sync data to SharedPreferences
   static Future<void> _savePendingUninstallStatusSync({
-    required int customerId,
+    required String imei1,
+    required String imei2,
+    required int isActive,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final pendingData = jsonEncode({
-      'customer_id': customerId,
-      'status': 2,
+      'imei_1': imei1,
+      'imei_2': imei2,
+      'is_active': isActive,
       'timestamp': DateTime.now().toIso8601String(),
     });
     await prefs.setString(_pendingUninstallStatusSyncKey, pendingData);
@@ -843,9 +1056,23 @@ class RegisterDeviceProvider with ChangeNotifier{
       return false;
     }
 
-    // Make API call with pending data
+    final imei1 = pendingData['imei_1'] as String? ??
+        (await getImei1() ?? '');
+    final imei2 = pendingData['imei_2'] as String? ??
+        (await getImei2() ?? '');
+    final isActive = _ensureInt(
+      pendingData['is_active'] ?? pendingData['status'],
+    );
+
+    if (imei1.isEmpty) {
+      debugPrint('   IMEI 1 missing in pending sync - cannot sync');
+      return false;
+    }
+
     final success = await _makeUpdateCustomerStatusApiCall(
-      customerId: pendingData['customer_id'] as int,
+      imei1: imei1,
+      imei2: imei2,
+      isActive: isActive,
     );
 
     if (success) {
@@ -860,39 +1087,38 @@ class RegisterDeviceProvider with ChangeNotifier{
   /// This sends SIM card information to the server
   /// Returns true if successful, false otherwise
   static Future<bool> updateDeviceSimDetailsApi({
-    required String imeiNo1,
-    String? imeiNo2,
     required int simCount,
     String? sim1NetworkName,
     String? sim1Number,
     String? sim1CountryIso,
-    String? sim1DisplayName,
     String? sim2NetworkName,
     String? sim2Number,
     String? sim2CountryIso,
-    String? sim2DisplayName,
     String? networkType,
   }) async {
     debugPrint('📱📱📱 updateDeviceSimDetailsApi CALLED 📱📱📱');
-    debugPrint('   IMEI1: $imeiNo1, IMEI2: $imeiNo2');
     debugPrint('   SIM Count: $simCount');
 
     try {
-      final url = Uri.parse('${AppConstants.baseUrl}/update_device_sim_details');
+      final customerId = await getUserId();
+      if (customerId == null) {
+        debugPrint('❌ Customer ID is null - cannot update SIM details');
+        return false;
+      }
+
+      final url = Uri.parse(
+        MobileApiEndpoints.url(MobileApiEndpoints.simDetails(customerId)),
+      );
       debugPrint('📱 API URL: $url');
 
       final Map<String, dynamic> body = {
-        "imei_no1": imeiNo1,
-        "imei_no2": imeiNo2 ?? '',
         "sim_count": simCount,
         "sim1_network_name": sim1NetworkName ?? '',
         "sim1_number": sim1Number ?? '',
         "sim1_country_iso": sim1CountryIso ?? '',
-        "sim1_display_name": sim1DisplayName ?? '',
         "sim2_network_name": sim2NetworkName ?? '',
         "sim2_number": sim2Number ?? '',
         "sim2_country_iso": sim2CountryIso ?? '',
-        "sim2_display_name": sim2DisplayName ?? '',
         "network_type": networkType ?? '',
       };
       debugPrint('📱 Request body: $body');
@@ -908,20 +1134,19 @@ class RegisterDeviceProvider with ChangeNotifier{
       debugPrint('📱 Response status code: ${response.statusCode}');
       debugPrint('📱 Response body: ${response.body}');
 
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        if (responseData['success'] == true) {
-          debugPrint('✅ SIM details updated successfully');
-          return true;
-        } else {
-          debugPrint('❌ SIM details API returned success: false');
-          debugPrint('   Message: ${responseData['message']}');
-          return false;
-        }
-      } else {
+      final api = _readApiResponse(response, logLabel: 'sim-details');
+      if (!ApiResponse.isHttpOk(response.statusCode) || api == null) {
         debugPrint('❌ SIM details API error: ${response.statusCode}');
         return false;
       }
+
+      if (api.success) {
+        debugPrint('✅ SIM details updated successfully');
+        return true;
+      }
+
+      debugPrint('❌ SIM details API returned success: false — ${api.message}');
+      return false;
     } catch (error) {
       debugPrint('❌ Error updating SIM details: $error');
       return false;

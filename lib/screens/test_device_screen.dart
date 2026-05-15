@@ -24,7 +24,21 @@ class _TestDeviceScreenState extends State<TestDeviceScreen> with WidgetsBinding
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _loadCurrentLockCode();
+    _initUnlockCode();
+  }
+
+  Future<void> _initUnlockCode() async {
+    await _loadCurrentLockCode();
+    final unlockCode = await RegisterDeviceProvider.getUnlockCode();
+    if (unlockCode == null || unlockCode.isEmpty) {
+      setState(() => _statusMessage = 'Fetching unlock code...');
+      final provider = RegisterDeviceProvider();
+      await provider.getLockCodeApi(null);
+      await _loadCurrentLockCode();
+      if (mounted) {
+        setState(() => _statusMessage = '');
+      }
+    }
   }
 
   @override
@@ -42,51 +56,38 @@ class _TestDeviceScreenState extends State<TestDeviceScreen> with WidgetsBinding
   }
 
   Future<void> _loadCurrentLockCode() async {
-    // Force reload SharedPreferences to get fresh values from disk
-    // This is needed because native Android code may have updated the values
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.reload(); // Reload from disk to get latest values from native code
-    final lockCode = prefs.getString('lock_pin') ?? prefs.getString('lock_code') ?? '1234';
+    final unlockCode = await RegisterDeviceProvider.getUnlockCode() ?? '';
     setState(() {
-      _currentLockCode = lockCode;
+      _currentLockCode = unlockCode;
       if (_previousLockCode.isEmpty) {
-        _previousLockCode = lockCode; // Initialize on first load
+        _previousLockCode = unlockCode;
       }
     });
   }
 
   Future<void> _loadCurrentLockCodeAndCheckForChanges() async {
-    // Force reload SharedPreferences to get fresh values from disk
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.reload();
-    final lockCode = prefs.getString('lock_pin') ?? prefs.getString('lock_code') ?? '1234';
+    final unlockCode = await RegisterDeviceProvider.getUnlockCode() ?? '';
 
-    // Check if lock code changed (device was unlocked and new PIN generated)
-    if (_previousLockCode.isNotEmpty && lockCode != _previousLockCode) {
-      debugPrint('🔑 Lock code changed from $_previousLockCode to $lockCode');
-
-      // Call API to update the new lock code on server
-      _updateDeviceStatusOnServer(lockCode);
+    if (_previousLockCode.isNotEmpty &&
+        unlockCode.isNotEmpty &&
+        unlockCode != _previousLockCode) {
+      debugPrint('🔑 Unlock code changed from $_previousLockCode to $unlockCode');
+      await _updateUnlockCodeOnServer(unlockCode);
     }
 
     setState(() {
       _previousLockCode = _currentLockCode;
-      _currentLockCode = lockCode;
+      _currentLockCode = unlockCode;
     });
   }
 
-  Future<void> _updateDeviceStatusOnServer(String newLockCode) async {
-    debugPrint('📤 Updating device status on server with new lock code: $newLockCode');
-
-    final success = await RegisterDeviceProvider.updateActualDeviceStatus(
-      lockCode: newLockCode,
-      actualDeviceStatus: 'unlock',
-    );
-
+  Future<void> _updateUnlockCodeOnServer(String newUnlockCode) async {
+    debugPrint('📤 Updating unlock code on server: $newUnlockCode');
+    final success = await RegisterDeviceProvider.updateUnlockCodeApi(newUnlockCode);
     if (success) {
-      debugPrint('✅ Device status updated successfully');
+      debugPrint('✅ Unlock code updated on server');
     } else {
-      debugPrint('⚠️ Device status update failed or queued for later sync');
+      debugPrint('⚠️ Unlock code update failed');
     }
   }
 
@@ -127,7 +128,7 @@ Future<void> _lockDevice() async {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('device_locked', true);
       // Use existing lock_pin if available, otherwise default to '1234'
-      final existingPin = prefs.getString('lock_pin') ?? prefs.getString('lock_code') ?? '1234';
+      final existingPin = await RegisterDeviceProvider.getUnlockCode() ?? '';
       await prefs.setString('lock_pin', existingPin);
       await prefs.setString('lock_user_id', userIdString);
       debugPrint('   Lock state saved to SharedPreferences with PIN: $existingPin');
@@ -154,6 +155,16 @@ Future<void> _lockDevice() async {
         // Start native LockActivity with Lock Task Mode
         final result = await KioskService.startLockActivity();
         debugPrint('   🔒 LockActivity started: $result');
+
+        // Server actual_lock_status=1 when lock UI is shown (same as FCM / dial). Offline-safe.
+        try {
+          await RegisterDeviceProvider.updateActualDeviceStatus(
+            lockCode: existingPin,
+            actualLockStatus: 1,
+          );
+        } catch (e) {
+          debugPrint('   ⚠️ updateActualDeviceStatus after test lock: $e');
+        }
 
         return result;
       } catch (e) {
@@ -447,7 +458,7 @@ Future<void> _lockDevice() async {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text(
-                          'Current Lock Code',
+                          'Current Unlock Code',
                           style: TextStyle(
                             fontSize: 12,
                             color: Colors.black54,

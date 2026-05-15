@@ -16,18 +16,26 @@ import kotlin.concurrent.thread
  */
 object DeviceStatusApi {
     private const val TAG = "DeviceStatusApi"
-    private const val BASE_URL = "https://locker.deploylogics.com/api"
+    private const val BASE_URL = "https://api.deviceguardian.net/api"
     private const val PREFS_NAME = "FlutterSharedPreferences"
-    private const val USER_ID_KEY = "flutter.registered_device_id"
-    private const val LOCK_CODE_KEY = "flutter.lock_code"
-    private const val LOCK_PIN_KEY = "flutter.lock_pin"
+    private const val IMEI1_KEY = "flutter.device_imei1"
+    private const val IMEI2_KEY = "flutter.device_imei2"
     private const val PENDING_SYNC_KEY = "flutter.pending_device_status_sync"
 
     /**
+     * Normalize lock status for API body: server expects **1** = locked, **0** = unlocked.
+     * Accepts legacy strings ("lock" / "unlock") for call-site compatibility.
+     */
+    fun actualLockStatusToInt(status: String): Int {
+        val s = status.trim().lowercase()
+        if (s == "1" || s == "true" || s == "lock" || s == "locked") return 1
+        if (s == "0" || s == "false" || s == "unlock" || s == "unlocked") return 0
+        return s.toIntOrNull()?.let { if (it != 0) 1 else 0 } ?: 0
+    }
+
+    /**
      * Update actual device status on the server
-     * @param context Android context
-     * @param lockCode The current lock code
-     * @param actualDeviceStatus Either "lock" or "unlock"
+     * @param actualDeviceStatus "lock"|"unlock" or "1"|"0" — sent as integer in JSON
      */
     fun updateActualDeviceStatus(
         context: Context,
@@ -37,52 +45,39 @@ object DeviceStatusApi {
         thread {
             try {
                 val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val imei1 = prefs.getString(IMEI1_KEY, "") ?: ""
+                val imei2 = prefs.getString(IMEI2_KEY, "") ?: ""
 
-                // Get user ID (customer_id)
-                val userId = try {
-                    prefs.getLong(USER_ID_KEY, 0L)
-                } catch (e: ClassCastException) {
-                    try {
-                        prefs.getInt(USER_ID_KEY, 0).toLong()
-                    } catch (e2: Exception) {
-                        0L
-                    }
-                }
-
-                if (userId == 0L) {
-                    Log.e(TAG, "❌ User ID not found - cannot update device status")
+                if (imei1.isEmpty()) {
+                    Log.e(TAG, "❌ IMEI 1 not found - cannot update device status")
                     return@thread
                 }
 
                 Log.d(TAG, "📤 Calling updateActualDeviceStatus API")
-                Log.d(TAG, "   customer_id: $userId")
-                Log.d(TAG, "   lock_code: $lockCode")
-                Log.d(TAG, "   actual_device_status: $actualDeviceStatus")
+                Log.d(TAG, "   imei_1: $imei1")
+                Log.d(TAG, "   imei_2: $imei2")
+                val statusInt = actualLockStatusToInt(actualDeviceStatus)
+                Log.d(TAG, "   actual_lock_status: $statusInt")
 
-                val success = makeApiCall(userId, lockCode, actualDeviceStatus)
+                val success = makeApiCall(imei1, imei2, statusInt)
 
                 if (success) {
                     Log.d(TAG, "✅ Device status updated successfully on server")
-                    // Clear any pending sync
                     prefs.edit().remove(PENDING_SYNC_KEY).apply()
                 } else {
                     Log.w(TAG, "⚠️ API call failed - saving for later sync")
-                    // Save for later sync when internet is available
-                    savePendingSync(prefs, userId, lockCode, actualDeviceStatus)
+                    savePendingSync(prefs, imei1, imei2, actualLockStatusToInt(actualDeviceStatus))
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error updating device status: ${e.message}")
                 e.printStackTrace()
 
-                // Save for later sync
                 try {
                     val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    val userId = try {
-                        prefs.getLong(USER_ID_KEY, 0L)
-                    } catch (e: Exception) { 0L }
-
-                    if (userId != 0L) {
-                        savePendingSync(prefs, userId, lockCode, actualDeviceStatus)
+                    val imei1 = prefs.getString(IMEI1_KEY, "") ?: ""
+                    val imei2 = prefs.getString(IMEI2_KEY, "") ?: ""
+                    if (imei1.isNotEmpty()) {
+                        savePendingSync(prefs, imei1, imei2, actualLockStatusToInt(actualDeviceStatus))
                     }
                 } catch (e2: Exception) {
                     Log.e(TAG, "❌ Error saving pending sync: ${e2.message}")
@@ -91,10 +86,10 @@ object DeviceStatusApi {
         }
     }
 
-    private fun makeApiCall(customerId: Long, lockCode: String, actualDeviceStatus: String): Boolean {
+    private fun makeApiCall(imei1: String, imei2: String, actualLockStatus: Int): Boolean {
         var connection: HttpURLConnection? = null
         try {
-            val url = URL("$BASE_URL/update_actual_device_status")
+            val url = URL("$BASE_URL/mobile/update_actual_device_status")
             connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "POST"
             connection.setRequestProperty("Content-Type", "application/json")
@@ -103,23 +98,23 @@ object DeviceStatusApi {
             connection.connectTimeout = 15000
             connection.readTimeout = 15000
 
-            // Create JSON body
+            val statusOut = if (actualLockStatus != 0) 1 else 0
             val jsonBody = JSONObject().apply {
-                put("customer_id", customerId)
-                put("lock_code", lockCode)
-                put("actual_device_status", actualDeviceStatus)
+                put("imei_1", imei1)
+                put("actual_lock_status", statusOut)
+                if (imei2.isNotEmpty()) {
+                    put("imei_2", imei2)
+                }
             }
 
-            Log.d(TAG, "🌐 API URL: ${url}")
+            Log.d(TAG, "🌐 API URL: $url")
             Log.d(TAG, "🌐 Request body: $jsonBody")
 
-            // Write body
             OutputStreamWriter(connection.outputStream).use { writer ->
                 writer.write(jsonBody.toString())
                 writer.flush()
             }
 
-            // Get response
             val responseCode = connection.responseCode
             Log.d(TAG, "🌐 Response code: $responseCode")
 
@@ -150,18 +145,20 @@ object DeviceStatusApi {
 
     private fun savePendingSync(
         prefs: android.content.SharedPreferences,
-        customerId: Long,
-        lockCode: String,
-        actualDeviceStatus: String
+        imei1: String,
+        imei2: String,
+        actualLockStatus: Int
     ) {
-        val pendingData = JSONObject().apply {
-            put("customer_id", customerId)
-            put("lock_code", lockCode)
-            put("actual_device_status", actualDeviceStatus)
-            put("timestamp", System.currentTimeMillis())
-        }
-        prefs.edit().putString(PENDING_SYNC_KEY, pendingData.toString()).apply()
-        Log.d(TAG, "💾 Pending sync data saved: $pendingData")
+        val statusNumeric = if (actualLockStatus != 0) 1 else 0
+        val ts = System.currentTimeMillis()
+        // Encode `actual_lock_status` as JSON number literals 0/1 (never "lock"/"unlock" strings).
+        val pendingJson =
+            "{\"imei_1\":${JSONObject.quote(imei1)}," +
+                "\"imei_2\":${JSONObject.quote(imei2)}," +
+                "\"actual_lock_status\":$statusNumeric," +
+                "\"timestamp\":$ts}"
+        prefs.edit().putString(PENDING_SYNC_KEY, pendingJson).apply()
+        Log.d(TAG, "💾 Pending sync data saved: $pendingJson")
     }
 
     /**
@@ -182,11 +179,18 @@ object DeviceStatusApi {
                 Log.d(TAG, "📤 Found pending sync data: $pendingDataStr")
 
                 val pendingData = JSONObject(pendingDataStr)
-                val customerId = pendingData.getLong("customer_id")
-                val lockCode = pendingData.getString("lock_code")
-                val actualDeviceStatus = pendingData.getString("actual_device_status")
+                val imei1 = pendingData.optString("imei_1", "")
+                    .ifEmpty { prefs.getString(IMEI1_KEY, "") ?: "" }
+                val imei2 = pendingData.optString("imei_2", "")
+                    .ifEmpty { prefs.getString(IMEI2_KEY, "") ?: "" }
+                val statusInt = readPendingLockStatusInt(pendingData)
 
-                val success = makeApiCall(customerId, lockCode, actualDeviceStatus)
+                if (imei1.isEmpty()) {
+                    Log.e(TAG, "❌ IMEI 1 missing in pending sync")
+                    return@thread
+                }
+
+                val success = makeApiCall(imei1, imei2, statusInt)
 
                 if (success) {
                     prefs.edit().remove(PENDING_SYNC_KEY).apply()
@@ -199,5 +203,17 @@ object DeviceStatusApi {
             }
         }
     }
-}
 
+    private fun readPendingLockStatusInt(pendingData: JSONObject): Int {
+        if (pendingData.has("actual_lock_status")) {
+            when (val raw = pendingData.opt("actual_lock_status")) {
+                is Int -> return if (raw != 0) 1 else 0
+                is Number -> return if (raw.toInt() != 0) 1 else 0
+                else -> return actualLockStatusToInt(raw?.toString() ?: "0")
+            }
+        }
+        return actualLockStatusToInt(
+            pendingData.optString("actual_device_status", "unlock")
+        )
+    }
+}

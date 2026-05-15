@@ -163,10 +163,8 @@ class LockOverlayService : Service() {
         } else {
             // Get existing lock code from SharedPreferences
             val prefs = getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE)
-            unlockPin = prefs.getString("flutter.lock_code", null)
-                ?: prefs.getString("flutter.lock_pin", null)
-                ?: "1234"
-            Log.d(TAG, "Using existing lock code from SharedPreferences: $unlockPin")
+            unlockPin = UnlockCodeApi.getStoredUnlockCode(prefs).ifEmpty { "000000" }
+            Log.d(TAG, "Using unlock code from SharedPreferences: $unlockPin")
         }
 
         Log.d(TAG, "userId: $userId, pin: $unlockPin, isShowing: $isShowing")
@@ -776,15 +774,16 @@ class LockOverlayService : Service() {
         }
         dialogCard.addView(dialogTitle)
 
-        // PIN input
+        // PIN input (6 digits)
         val pinInput = EditText(this).apply {
-            hint = "Enter PIN"
+            hint = "Enter 6-digit code"
             setHintTextColor(Color.parseColor("#666666"))
             setTextColor(Color.WHITE)
             textSize = 18f
             gravity = Gravity.CENTER
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or
                        android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            filters = arrayOf(android.text.InputFilter.LengthFilter(6))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -856,14 +855,25 @@ class LockOverlayService : Service() {
             }
             background = buttonBg
             setOnClickListener {
-                val enteredPin = pinInput.text.toString()
+                val enteredPin = pinInput.text.toString().trim()
+                if (enteredPin.length != 6) {
+                    Toast.makeText(
+                        this@LockOverlayService,
+                        "Please enter a 6-digit code",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@setOnClickListener
+                }
                 if (enteredPin == unlockPin) {
-                    // Correct PIN - hide overlay
+                    val newCode = UnlockCodeApi.generateUnlockCode()
+                    val prefs = getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE)
+                    UnlockCodeApi.saveUnlockCodeLocally(prefs, newCode)
+                    unlockPin = newCode
+                    UnlockCodeApi.updateUnlockCode(applicationContext, newCode)
                     hidePinDialog(dialogContainer)
                     hideOverlay()
                 } else {
-                    // Wrong PIN
-                    Toast.makeText(this@LockOverlayService, "Incorrect PIN", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@LockOverlayService, "Incorrect code", Toast.LENGTH_SHORT).show()
                     pinInput.setText("")
                 }
             }
