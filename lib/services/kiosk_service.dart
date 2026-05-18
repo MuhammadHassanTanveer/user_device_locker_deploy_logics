@@ -871,9 +871,18 @@ class KioskService {
   /// - Network type (4G LTE, 5G, 3G, etc.)
   ///
   /// The collected data is automatically sent to the server API.
+  /// Collect SIM data and POST to sim-details API (native).
   /// Requires READ_PHONE_STATE permission.
   static Future<bool> getSimDetails() async =>
       await _channel.invokeMethod<bool>('getSimDetails') ?? false;
+
+  /// Collect SIM data for [RegisterDeviceProvider.updateDeviceSimDetailsApi].
+  /// sim1_* = physical slot 0, sim2_* = physical slot 1.
+  static Future<Map<String, dynamic>?> getSimDetailsForApi() async {
+    final raw = await _channel.invokeMethod<Map<Object?, Object?>>('getSimDetailsForApi');
+    if (raw == null) return null;
+    return raw.map((key, value) => MapEntry(key.toString(), value));
+  }
 
   // ==================== Factory Reset Warning ====================
 

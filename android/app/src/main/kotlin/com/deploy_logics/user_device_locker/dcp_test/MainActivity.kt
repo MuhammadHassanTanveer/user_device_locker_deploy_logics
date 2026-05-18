@@ -1160,14 +1160,26 @@ class MainActivity : FlutterActivity() {
                 // ==================== SIM Details ====================
 
                 "getSimDetails" -> {
-                    Log.d(TAG, "getSimDetails called - delegating to DeviceCommandService")
-                    try {
-                        DeviceCommandService.executeCommand(this, "sim_details")
-                        result.success(true)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error executing getSimDetails: ${e.message}")
-                        result.success(false)
-                    }
+                    Log.d(TAG, "getSimDetails called - collect and POST sim-details")
+                    Thread {
+                        val ok = SimDetailsCollector.sendToServer(this@MainActivity)
+                        runOnUiThread { result.success(ok) }
+                    }.start()
+                }
+
+                "getSimDetailsForApi" -> {
+                    Log.d(TAG, "getSimDetailsForApi called")
+                    Thread {
+                        try {
+                            val payload = SimDetailsCollector.buildApiPayloadMap(this@MainActivity)
+                            runOnUiThread { result.success(payload) }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "getSimDetailsForApi failed: ${e.message}")
+                            runOnUiThread {
+                                result.error("SIM_DETAILS", e.message, null)
+                            }
+                        }
+                    }.start()
                 }
 
                 // ==================== Factory Reset Warning ====================

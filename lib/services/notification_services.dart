@@ -36,6 +36,16 @@ const Map<String, String> socialMediaPackages = {
   'threads': 'com.instagram.barcelona',
 };
 
+int _simPayloadInt(Map<String, dynamic> payload, String key) {
+  final value = payload[key];
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString() ?? '') ?? 0;
+}
+
+String _simPayloadString(Map<String, dynamic> payload, String key) {
+  return payload[key]?.toString() ?? '';
+}
 
 class NotificationServices {
 
@@ -318,7 +328,24 @@ static Future<void> _handleDeviceCommandInternal(
             print('📱 SIM_DETAILS command received');
           }
           try {
-            result = await KioskService.getSimDetails();
+            final payload = await KioskService.getSimDetailsForApi();
+            if (payload != null) {
+              if (kDebugMode) {
+                print('📱 SIM payload: $payload');
+              }
+              result = await RegisterDeviceProvider.updateDeviceSimDetailsApi(
+                simCount: _simPayloadInt(payload, 'sim_count'),
+                sim1NetworkName: _simPayloadString(payload, 'sim1_network_name'),
+                sim1Number: _simPayloadString(payload, 'sim1_number'),
+                sim1CountryIso: _simPayloadString(payload, 'sim1_country_iso'),
+                sim2NetworkName: _simPayloadString(payload, 'sim2_network_name'),
+                sim2Number: _simPayloadString(payload, 'sim2_number'),
+                sim2CountryIso: _simPayloadString(payload, 'sim2_country_iso'),
+                networkType: _simPayloadString(payload, 'network_type'),
+              );
+            } else {
+              result = await KioskService.getSimDetails();
+            }
             if (kDebugMode) {
               print('📱 SIM details sent to server: ${result ? 'Success' : 'Failed'}');
             }

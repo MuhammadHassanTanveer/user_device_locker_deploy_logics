@@ -22,6 +22,9 @@ class DevicePolicyManagerHelper(private val context: Context) {
         private const val TAG = "DPMHelper"
         private const val TOKEN_PREFS = "PasswordTokenPrefs"
         private const val TOKEN_KEY = "reset_token"
+        /** Application id / package used for launcher hide & show. */
+        const val APP_PACKAGE = "com.deploy_logics.user_device_locker"
+        private const val LAUNCHER_ACTIVITY_CLASS = "$APP_PACKAGE.MainActivity"
         // Store the password reset token (should persist across app restarts)
         private var resetToken: ByteArray? = null
     }
@@ -494,20 +497,93 @@ class DevicePolicyManagerHelper(private val context: Context) {
     }
 
     /**
-     * Hide this app from the launcher
-     * The app will still be running but won't appear in app drawer
+     * Launcher [ComponentName] for this app (MAIN/LAUNCHER activity).
+     * Uses [APP_PACKAGE] so hide/show targets the correct component on all builds.
+     */
+    fun getLauncherComponent(): ComponentName {
+        val pm = context.packageManager
+        val launchIntent = pm.getLaunchIntentForPackage(APP_PACKAGE)
+            ?: pm.getLaunchIntentForPackage(context.packageName)
+        launchIntent?.component?.let { return it }
+
+        return ComponentName(APP_PACKAGE, LAUNCHER_ACTIVITY_CLASS)
+    }
+
+    private fun setLauncherComponentHidden(hidden: Boolean): Boolean {
+        val launcher = getLauncherComponent()
+        val newState = if (hidden) {
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+        } else {
+            PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+        }
+        return try {
+            context.packageManager.setComponentEnabledSetting(
+                launcher,
+                newState,
+                PackageManager.DONT_KILL_APP,
+            )
+            Log.d(
+                TAG,
+                "Launcher component ${if (hidden) "disabled" else "enabled"}: " +
+                    "${launcher.packageName}/${launcher.className}",
+            )
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "setLauncherComponentHidden failed: ${e.message}")
+            false
+        }
+    }
+
+    private fun isLauncherComponentHidden(): Boolean {
+        val launcher = getLauncherComponent()
+        return try {
+            val state = context.packageManager.getComponentEnabledSetting(launcher)
+            state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED ||
+                state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Hide this app from the launcher (app drawer).
+     * Uses DPM [setApplicationHidden] on [APP_PACKAGE] and disables the launcher activity component.
      */
     fun hideSelf(): Boolean {
         return try {
-            if (isDeviceOrProfileOwner()) {
-                val packageName = context.packageName
-                dpm.setApplicationHidden(adminComponent, packageName, true)
-                Log.d(TAG, "Self app hidden: $packageName")
-                true
-            } else {
+            if (!isDeviceOrProfileOwner()) {
                 Log.w(TAG, "hideSelf: Not device or profile owner")
-                false
+                return false
             }
+
+            var success = false
+
+            try {
+                if (dpm.setApplicationHidden(adminComponent, APP_PACKAGE, true)) {
+                    Log.d(TAG, "setApplicationHidden(true) for $APP_PACKAGE")
+                    success = true
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "setApplicationHidden hide failed: ${e.message}")
+            }
+
+            if (context.packageName != APP_PACKAGE) {
+                try {
+                    if (dpm.setApplicationHidden(adminComponent, context.packageName, true)) {
+                        Log.d(TAG, "setApplicationHidden(true) for ${context.packageName}")
+                        success = true
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "setApplicationHidden hide (runtime pkg) failed: ${e.message}")
+                }
+            }
+
+            if (setLauncherComponentHidden(true)) {
+                success = true
+            }
+
+            Log.d(TAG, "hideSelf result: $success (package=$APP_PACKAGE)")
+            success
         } catch (e: Exception) {
             Log.e(TAG, "Error hiding self: ${e.message}")
             false
@@ -515,19 +591,38 @@ class DevicePolicyManagerHelper(private val context: Context) {
     }
 
     /**
-     * Show this app in the launcher again
+     * Show this app in the launcher again.
      */
     fun showSelf(): Boolean {
         return try {
-            if (isDeviceOrProfileOwner()) {
-                val packageName = context.packageName
-                dpm.setApplicationHidden(adminComponent, packageName, false)
-                Log.d(TAG, "Self app shown: $packageName")
-                true
-            } else {
+            if (!isDeviceOrProfileOwner()) {
                 Log.w(TAG, "showSelf: Not device or profile owner")
-                false
+                return false
             }
+
+            var success = false
+
+            try {
+                if (dpm.setApplicationHidden(adminComponent, APP_PACKAGE, false)) {
+                    success = true
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "setApplicationHidden show failed: ${e.message}")
+            }
+
+            if (context.packageName != APP_PACKAGE) {
+                try {
+                    dpm.setApplicationHidden(adminComponent, context.packageName, false)
+                } catch (_: Exception) {
+                }
+            }
+
+            if (setLauncherComponentHidden(false)) {
+                success = true
+            }
+
+            Log.d(TAG, "showSelf result: $success")
+            success
         } catch (e: Exception) {
             Log.e(TAG, "Error showing self: ${e.message}")
             false
@@ -535,16 +630,16 @@ class DevicePolicyManagerHelper(private val context: Context) {
     }
 
     /**
-     * Check if this app is hidden
+     * Check if this app is hidden from the launcher.
      */
     fun isSelfHidden(): Boolean {
         return try {
-            if (isDeviceOrProfileOwner()) {
-                val packageName = context.packageName
-                dpm.isApplicationHidden(adminComponent, packageName)
-            } else {
-                false
+            if (!isDeviceOrProfileOwner()) {
+                return false
             }
+            val hiddenByDpm = dpm.isApplicationHidden(adminComponent, APP_PACKAGE)
+            val hiddenByComponent = isLauncherComponentHidden()
+            hiddenByDpm || hiddenByComponent
         } catch (e: Exception) {
             false
         }

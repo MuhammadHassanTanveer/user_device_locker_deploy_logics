@@ -81,16 +81,23 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
 
     try {
       final hidden = await KioskService.hideSelf();
-      if (!hidden && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Could not hide app from launcher. Ensure Device Owner is active.',
+      if (!hidden) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Could not hide app from launcher. Ensure Device Owner is active.',
+              ),
+              backgroundColor: Colors.orange,
             ),
-            backgroundColor: Colors.orange,
-          ),
-        );
+          );
+        }
+        if (mounted) setState(() => _isFinishing = false);
+        return;
       }
+
+      // Let the system apply launcher component / DPM hide before finishing the activity.
+      await Future.delayed(const Duration(milliseconds: 400));
 
       await KioskService.exitApp();
     } catch (e) {
