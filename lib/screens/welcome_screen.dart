@@ -3,7 +3,6 @@ import '../models/mobile_api_models.dart';
 import '../providers/register_device_provider.dart';
 import '../services/kiosk_service.dart';
 import '../services/secret_code_service.dart';
-import 'test_device_screen.dart';
 
 class WelcomeScreen extends StatefulWidget {
   const WelcomeScreen({super.key});
@@ -19,6 +18,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
   CustomerProfile? _customer;
   bool _isDeviceOwner = false;
   bool _hasCalledLockCodeApi = false;
+  bool _isFinishing = false;
 
   @override
   void initState() {
@@ -71,6 +71,39 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
     } catch (e, stackTrace) {
       debugPrint('❌ Error fetching unlock code: $e');
       debugPrint('❌ Stack trace: $stackTrace');
+    }
+  }
+
+  Future<void> _onFinishedPressed() async {
+    if (_isFinishing) return;
+
+    setState(() => _isFinishing = true);
+
+    try {
+      final hidden = await KioskService.hideSelf();
+      if (!hidden && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Could not hide app from launcher. Ensure Device Owner is active.',
+            ),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+
+      await KioskService.exitApp();
+    } catch (e) {
+      debugPrint('❌ Error finishing setup: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        setState(() => _isFinishing = false);
+      }
     }
   }
 
@@ -207,14 +240,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
-                    onPressed: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => const TestDeviceScreen(),
-                        ),
-                      );
-                    },
+                    onPressed: _isFinishing ? null : _onFinishedPressed,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Theme.of(context).primaryColor,
                       foregroundColor: Colors.white,
@@ -223,16 +249,55 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    child: const Text(
-                      'Continue',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
+                    child: _isFinishing
+                        ? const SizedBox(
+                            height: 22,
+                            width: 22,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Text(
+                            'Finished',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
                   ),
                 ),
                 const SizedBox(height: 16),
+                // const SizedBox(height: 32),
+                // SizedBox(
+                //   width: double.infinity,
+                //   child: ElevatedButton(
+                //     onPressed: () {
+                //       Navigator.push(
+                //         context,
+                //         MaterialPageRoute(
+                //           builder: (context) => const TestDeviceScreen(),
+                //         ),
+                //       );
+                //     },
+                //     style: ElevatedButton.styleFrom(
+                //       backgroundColor: Theme.of(context).primaryColor,
+                //       foregroundColor: Colors.white,
+                //       padding: const EdgeInsets.symmetric(vertical: 16),
+                //       shape: RoundedRectangleBorder(
+                //         borderRadius: BorderRadius.circular(12),
+                //       ),
+                //     ),
+                //     child: const Text(
+                //       'Continue',
+                //       style: TextStyle(
+                //         fontSize: 16,
+                //         fontWeight: FontWeight.w600,
+                //       ),
+                //     ),
+                //   ),
+                // ),
+                // const SizedBox(height: 16),
               ],
             ),
           ),

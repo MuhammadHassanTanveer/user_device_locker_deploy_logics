@@ -6,9 +6,11 @@ import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../providers/register_device_provider.dart';
+import '../services/kiosk_service.dart';
 import '../services/notification_services.dart';
 import 'home_screen.dart';
 import 'register_device_screen.dart';
+import 'uninstall_ready_screen.dart';
 import 'welcome_screen.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -55,6 +57,12 @@ class _SplashScreenState extends State<SplashScreen> {
     await Future.delayed(const Duration(seconds: 2));
 
     if (!mounted) return;
+
+    // Uninstall FCM: show removal / re-register screen (app visible in launcher again).
+    if (await KioskService.hasPendingUninstallUi()) {
+      _navigateTo(const UninstallReadyScreen());
+      return;
+    }
 
     // Step 1: Check if all required permissions are granted
     final allPermissionsGranted = await _areAllPermissionsGranted();
@@ -185,7 +193,7 @@ class _SplashScreenState extends State<SplashScreen> {
 
             // App Name
             const Text(
-              'Device Locker',
+              'Device Guardian',
               style: TextStyle(
                 fontSize: 28,
                 fontWeight: FontWeight.bold,

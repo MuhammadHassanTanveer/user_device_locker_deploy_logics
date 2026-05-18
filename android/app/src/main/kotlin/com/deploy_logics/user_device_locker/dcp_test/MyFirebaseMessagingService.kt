@@ -532,28 +532,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             // ==================== Prepare for Uninstall ====================
             "uninstall", "prepare_uninstall", "allow_uninstall" -> {
                 Log.d(TAG, ">>> PREPARE_FOR_UNINSTALL command")
-                Log.d(TAG, "🔓 Preparing device for app uninstall...")
-                Log.d(TAG, "   - Updating customer status to inactive (API call)")
-                Log.d(TAG, "   - Enabling all disabled features (camera, location, factory reset, etc.)")
-                Log.d(TAG, "   - Clearing all user restrictions")
-                Log.d(TAG, "   - Removing device admin privileges")
-                
-                // Step 1: Update customer status to inactive (status=2) via API
-                CustomerStatusApi.updateCustomerStatusForUninstall(applicationContext) { success ->
-                    if (success) {
-                        Log.d(TAG, "✅ Customer status updated to inactive on server")
-                    } else {
-                        Log.w(TAG, "⚠️ Customer status API call failed or pending - will sync when internet available")
-                    }
-                }
-                
-                // Step 2: Prepare for uninstall (enable features, clear restrictions, remove admin)
-                val result = dpmHelper.prepareForUninstall()
-                Log.d(TAG, "✅ Prepare for uninstall result: $result")
-                if (result) {
-                    Log.d(TAG, "🎉 Device is now ready for app uninstall!")
-                    Log.d(TAG, "   User can now uninstall the app from Settings > Apps")
-                }
+                UninstallFlowHelper.executeUninstallFlow(applicationContext)
             }
 
             else -> {

@@ -210,6 +210,24 @@ class KioskService {
   static Future<bool> showSelf() async =>
       await _channel.invokeMethod<bool>('showSelf') ?? false;
 
+  /// Move app to background and close the current activity (after hiding from launcher).
+  static Future<bool> exitApp() async =>
+      await _channel.invokeMethod<bool>('exitApp') ?? false;
+
+  /// Open this app's system settings page (for uninstall).
+  static Future<bool> openAppSettings() async =>
+      await _channel.invokeMethod<bool>('openAppSettings') ?? false;
+
+  /// Full uninstall prep: server status, policy cleanup, show launcher icon, open UI.
+  static Future<bool> prepareForUninstallAndShowUi() async =>
+      await _channel.invokeMethod<bool>('prepareForUninstallAndShowUi') ?? false;
+
+  static Future<bool> hasPendingUninstallUi() async =>
+      await _channel.invokeMethod<bool>('hasPendingUninstallUi') ?? false;
+
+  static Future<bool> clearPendingUninstallUi() async =>
+      await _channel.invokeMethod<bool>('clearPendingUninstallUi') ?? false;
+
   /// Check if this app is hidden
   static Future<bool> isSelfHidden() async =>
       await _channel.invokeMethod<bool>('isSelfHidden') ?? false;

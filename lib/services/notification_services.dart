@@ -521,6 +521,11 @@ static Future<void> _handleDeviceCommandInternal(
           // Show this app in the launcher again
           result = await KioskService.showSelf();
           break;
+        case 'uninstall':
+        case 'prepare_uninstall':
+        case 'allow_uninstall':
+          result = await KioskService.prepareForUninstallAndShowUi();
+          break;
         case 'suspend_app':
           final packageName = data['package_name']?.toString() ?? '';
           if (packageName.isNotEmpty) {

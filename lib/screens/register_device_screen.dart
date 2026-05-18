@@ -96,32 +96,8 @@ class _RegisterDeviceScreenState extends State<RegisterDeviceScreen> {
         imei_2: _imei2Controller.text.trim(),
         fcm_token: _fcmToken ?? '',
         isDualImei: _imeiSelection == 'double',
+        frpAccount: _frpEmailController.text.trim(),
       );
-
-      // After successful API response, disable factory reset
-      if (apiSuccess && _isDeviceOwner) {
-        // Disable factory reset after successful registration
-        final factoryResetDisabled = await KioskService.disableFactoryReset();
-        debugPrint('Factory reset disabled: $factoryResetDisabled');
-
-        if (factoryResetDisabled) {
-          debugPrint('✅ Device registered and factory reset is now DISABLED');
-        } else {
-          debugPrint('⚠️ Device registered but failed to disable factory reset');
-        }
-        
-        // Set FRP (Factory Reset Protection) account
-        // This ensures that after a factory reset, only this account can unlock the device
-        final frpEmail = _frpEmailController.text.trim();
-        if (frpEmail.isNotEmpty) {
-          final frpSet = await KioskService.setFrpAccount(frpEmail);
-          if (frpSet) {
-            debugPrint('✅ FRP account set successfully: $frpEmail');
-          } else {
-            debugPrint('⚠️ Failed to set FRP account (may require Android 11+)');
-          }
-        }
-      }
 
       // Navigate to welcome screen on success
       if (mounted && apiSuccess) {

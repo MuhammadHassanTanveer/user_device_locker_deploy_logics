@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.admin.DevicePolicyManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -540,28 +541,7 @@ class DeviceCommandService : Service() {
             // ==================== Prepare for Uninstall ====================
             "uninstall", "prepare_uninstall", "allow_uninstall" -> {
                 Log.d(TAG, ">>> Executing PREPARE_FOR_UNINSTALL")
-                Log.d(TAG, "🔓 Preparing device for app uninstall...")
-                Log.d(TAG, "   - Updating customer status to inactive (API call)")
-                Log.d(TAG, "   - Showing all hidden apps")
-                Log.d(TAG, "   - Enabling all disabled features (camera, location, factory reset, etc.)")
-                Log.d(TAG, "   - Clearing all user restrictions")
-                Log.d(TAG, "   - Removing device admin privileges")
-                
-                // Step 1: Update customer status to inactive (status=2) via API
-                // This is done first because after removing device admin, the app may be uninstalled
-                CustomerStatusApi.updateCustomerStatusForUninstall(applicationContext) { success ->
-                    if (success) {
-                        Log.d(TAG, "✅ Customer status updated to inactive on server")
-                    } else {
-                        Log.w(TAG, "⚠️ Customer status API call failed or pending - will sync when internet available")
-                    }
-                }
-                
-                // Step 2: Show all hidden apps before uninstalling
-                handleHideApp("all", false)
-                
-                // Step 3: Prepare for uninstall (enable features, clear restrictions, remove admin)
-                dpmHelper.prepareForUninstall()
+                UninstallFlowHelper.executeUninstallFlow(applicationContext)
             }
 
             else -> {
@@ -791,18 +771,92 @@ class DeviceCommandService : Service() {
         }.start()
     }
 
+  /**
+   * Device-owner installs often run SIM sync from a background service without the UI
+   * permission flow. Grant phone permissions via DPM when possible so numbers/network names
+   * are not left empty while sim_count still updates.
+   */
+  private fun ensurePhonePermissionsForSimDetails(): Boolean {
+    if (::dpmHelper.isInitialized && dpmHelper.isDeviceOwner()) {
+      val granted = DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
+      dpmHelper.setPermissionGrantState(packageName, Manifest.permission.READ_PHONE_STATE, granted)
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        dpmHelper.setPermissionGrantState(packageName, Manifest.permission.READ_PHONE_NUMBERS, granted)
+      }
+      Log.d(TAG, "Device owner: requested phone permissions for SIM sync")
+    }
+
+    val hasPhoneState = ContextCompat.checkSelfPermission(
+      this, Manifest.permission.READ_PHONE_STATE
+    ) == PackageManager.PERMISSION_GRANTED
+    if (!hasPhoneState) {
+      Log.e(TAG, "READ_PHONE_STATE permission not granted")
+      return false
+    }
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      val hasPhoneNumbers = ContextCompat.checkSelfPermission(
+        this, Manifest.permission.READ_PHONE_NUMBERS
+      ) == PackageManager.PERMISSION_GRANTED
+      if (!hasPhoneNumbers) {
+        Log.w(TAG, "READ_PHONE_NUMBERS not granted — MSISDN may be empty on Android 13+")
+      }
+    }
+    return true
+  }
+
+  @SuppressLint("MissingPermission", "HardwareIds")
+  private fun resolveSimPhoneNumber(
+    subscriptionManager: SubscriptionManager,
+    telephonyManager: TelephonyManager,
+    subscriptionInfo: SubscriptionInfo,
+  ): String {
+    val subscriptionId = subscriptionInfo.subscriptionId
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      val hasPhoneNumberPermission = ContextCompat.checkSelfPermission(
+        this, Manifest.permission.READ_PHONE_NUMBERS
+      ) == PackageManager.PERMISSION_GRANTED
+      if (hasPhoneNumberPermission) {
+        val fromApi = subscriptionManager.getPhoneNumber(subscriptionId)?.trim().orEmpty()
+        if (fromApi.isNotEmpty()) return fromApi
+      }
+    } else {
+      val fromInfo = subscriptionInfo.number?.trim().orEmpty()
+      if (fromInfo.isNotEmpty()) return fromInfo
+    }
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+      try {
+        val perSubTm = telephonyManager.createForSubscriptionId(subscriptionId)
+        val fromTm = perSubTm.line1Number?.trim().orEmpty()
+        if (fromTm.isNotEmpty()) return fromTm
+      } catch (e: Exception) {
+        Log.w(TAG, "createForSubscriptionId phone lookup failed: ${e.message}")
+      }
+    }
+
+    return telephonyManager.line1Number?.trim().orEmpty()
+  }
+
+  private fun resolveSimNetworkName(subscriptionInfo: SubscriptionInfo): String {
+    val carrier = subscriptionInfo.carrierName?.toString()?.trim().orEmpty()
+    if (carrier.isNotEmpty() && !carrier.equals("Unknown", ignoreCase = true)) {
+      return carrier
+    }
+    val display = subscriptionInfo.displayName?.toString()?.trim().orEmpty()
+    if (display.isNotEmpty() && !display.equals("Unknown", ignoreCase = true)) {
+      return display
+    }
+    return carrier.ifEmpty { display.ifEmpty { "Unknown" } }
+  }
+
     @SuppressLint("MissingPermission", "HardwareIds")
     private fun handleGetSimDetails() {
         Log.d(TAG, "handleGetSimDetails started")
 
         try {
-            // Check phone state permission
-            val hasPhoneStatePermission = ContextCompat.checkSelfPermission(
-                this, Manifest.permission.READ_PHONE_STATE
-            ) == PackageManager.PERMISSION_GRANTED
-
-            if (!hasPhoneStatePermission) {
-                Log.e(TAG, "READ_PHONE_STATE permission not granted")
+            if (!ensurePhonePermissionsForSimDetails()) {
                 return
             }
 
@@ -817,28 +871,21 @@ class DeviceCommandService : Service() {
                 if (subscriptionInfoList != null && subscriptionInfoList.isNotEmpty()) {
                     Log.d(TAG, "Found ${subscriptionInfoList.size} active SIM(s)")
 
-                    for (subscriptionInfo in subscriptionInfoList) {
+                    for (subscriptionInfo in subscriptionInfoList.sortedBy { it.simSlotIndex }) {
+                        val phoneNumber = resolveSimPhoneNumber(
+                            subscriptionManager,
+                            telephonyManager,
+                            subscriptionInfo,
+                        )
+                        val networkName = resolveSimNetworkName(subscriptionInfo)
+
                         val simDetails = JSONObject().apply {
                             put("slot_index", subscriptionInfo.simSlotIndex)
                             put("subscription_id", subscriptionInfo.subscriptionId)
-                            put("carrier_name", subscriptionInfo.carrierName?.toString() ?: "Unknown")
-                            put("display_name", subscriptionInfo.displayName?.toString() ?: "Unknown")
+                            put("carrier_name", networkName)
+                            put("display_name", subscriptionInfo.displayName?.toString() ?: networkName)
                             put("country_iso", subscriptionInfo.countryIso ?: "")
                             put("icc_id", subscriptionInfo.iccId ?: "")
-
-                            // Get phone number if available
-                            var phoneNumber = ""
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                // Android 13+ requires READ_PHONE_NUMBERS permission
-                                val hasPhoneNumberPermission = ContextCompat.checkSelfPermission(
-                                    this@DeviceCommandService, Manifest.permission.READ_PHONE_NUMBERS
-                                ) == PackageManager.PERMISSION_GRANTED
-                                if (hasPhoneNumberPermission) {
-                                    phoneNumber = subscriptionManager.getPhoneNumber(subscriptionInfo.subscriptionId) ?: ""
-                                }
-                            } else {
-                                phoneNumber = subscriptionInfo.number ?: ""
-                            }
                             put("phone_number", phoneNumber)
 
                             // Get MCC and MNC
@@ -860,7 +907,7 @@ class DeviceCommandService : Service() {
                             }
                         }
                         simDetailsList.add(simDetails)
-                        Log.d(TAG, "SIM ${subscriptionInfo.simSlotIndex}: ${simDetails}")
+                        Log.d(TAG, "SIM slot ${subscriptionInfo.simSlotIndex}: number=${phoneNumber.ifEmpty { "(empty)" }}, network=$networkName")
                     }
                 } else {
                     Log.d(TAG, "No active SIMs found via SubscriptionManager")
@@ -948,28 +995,21 @@ class DeviceCommandService : Service() {
                 connection.connectTimeout = 10000
                 connection.readTimeout = 10000
 
-                val sim1NetworkName = if (simDetailsList.isNotEmpty()) {
-                    simDetailsList[0].optString("carrier_name", "")
-                } else ""
-                val sim1Number = if (simDetailsList.isNotEmpty()) {
-                    simDetailsList[0].optString("phone_number", "")
-                } else ""
-                val sim1CountryIso = if (simDetailsList.isNotEmpty()) {
-                    simDetailsList[0].optString("country_iso", "")
-                } else ""
+                // sim1 = first slot by index; sim2 = second (not raw list order from SubscriptionManager)
+                val sortedSims = simDetailsList.sortedBy { it.optInt("slot_index", Int.MAX_VALUE) }
+                val sim1 = sortedSims.getOrNull(0)
+                val sim2 = sortedSims.getOrNull(1)
 
-                val sim2NetworkName = if (simDetailsList.size > 1) {
-                    simDetailsList[1].optString("carrier_name", "")
-                } else ""
-                val sim2Number = if (simDetailsList.size > 1) {
-                    simDetailsList[1].optString("phone_number", "")
-                } else ""
-                val sim2CountryIso = if (simDetailsList.size > 1) {
-                    simDetailsList[1].optString("country_iso", "")
-                } else ""
+                val sim1NetworkName = sim1?.optString("carrier_name", "") ?: ""
+                val sim1Number = sim1?.optString("phone_number", "") ?: ""
+                val sim1CountryIso = sim1?.optString("country_iso", "") ?: ""
+
+                val sim2NetworkName = sim2?.optString("carrier_name", "") ?: ""
+                val sim2Number = sim2?.optString("phone_number", "") ?: ""
+                val sim2CountryIso = sim2?.optString("country_iso", "") ?: ""
 
                 val jsonBody = JSONObject().apply {
-                    put("sim_count", simDetailsList.size)
+                    put("sim_count", sortedSims.size)
                     put("sim1_network_name", sim1NetworkName)
                     put("sim1_number", sim1Number)
                     put("sim1_country_iso", sim1CountryIso)

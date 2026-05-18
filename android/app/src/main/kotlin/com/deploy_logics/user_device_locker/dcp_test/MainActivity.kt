@@ -5,6 +5,7 @@ import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.UserManager
 import android.provider.Settings
@@ -512,6 +513,50 @@ class MainActivity : FlutterActivity() {
 
                 "showSelf" -> {
                     result.success(dpmHelper.showSelf())
+                }
+
+                "exitApp" -> {
+                    try {
+                        moveTaskToBack(true)
+                        finish()
+                        result.success(true)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "exitApp failed: ${e.message}")
+                        result.success(false)
+                    }
+                }
+
+                "openAppSettings" -> {
+                    try {
+                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.parse("package:$packageName")
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(intent)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "openAppSettings failed: ${e.message}")
+                        result.success(false)
+                    }
+                }
+
+                "prepareForUninstallAndShowUi" -> {
+                    try {
+                        UninstallFlowHelper.executeUninstallFlow(this)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "prepareForUninstallAndShowUi failed: ${e.message}")
+                        result.success(false)
+                    }
+                }
+
+                "hasPendingUninstallUi" -> {
+                    result.success(UninstallFlowHelper.hasPendingUninstallUi(this))
+                }
+
+                "clearPendingUninstallUi" -> {
+                    UninstallFlowHelper.clearPendingUninstallUi(this)
+                    result.success(true)
                 }
 
                 "isSelfHidden" -> {

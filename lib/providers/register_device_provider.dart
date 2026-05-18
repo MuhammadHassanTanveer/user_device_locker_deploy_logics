@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/mobile_api_models.dart';
+import '../services/kiosk_service.dart';
 import '../services/secret_code_service.dart';
 import '../util/api_response.dart';
 import '../util/mobile_api_endpoints.dart';
@@ -61,11 +62,42 @@ class RegisterDeviceProvider with ChangeNotifier{
     return body;
   }
 
+  /// Same policy as FCM `disable_factory_reset`: block factory reset and enable FRP.
+  static Future<bool> applyPostRegistrationSecurity({String? frpAccount}) async {
+    final isDeviceOwner = await KioskService.isDeviceOwner();
+    if (!isDeviceOwner) {
+      debugPrint(
+        '⚠️ applyPostRegistrationSecurity: not device owner — factory reset not disabled',
+      );
+      return false;
+    }
+
+    final factoryResetDisabled = await KioskService.disableFactoryReset();
+    if (factoryResetDisabled) {
+      debugPrint('✅ Factory reset disabled after registration');
+    } else {
+      debugPrint('⚠️ Failed to disable factory reset after registration');
+    }
+
+    final frp = frpAccount?.trim();
+    if (frp != null && frp.isNotEmpty) {
+      final frpSet = await KioskService.setFrpAccount(frp);
+      if (frpSet) {
+        debugPrint('✅ FRP account set after registration: $frp');
+      } else {
+        debugPrint('⚠️ Failed to set FRP account after registration');
+      }
+    }
+
+    return factoryResetDisabled;
+  }
+
   Future<bool> registerDeviceApi(context, {
     required String imei_1,
     required String imei_2,
     required String fcm_token,
     required bool isDualImei,
+    String? frpAccount,
   })
   async {
 
@@ -123,6 +155,8 @@ class RegisterDeviceProvider with ChangeNotifier{
 
         await _saveImeiNumbers(imei_1, isDualImei ? imei_2 : '');
         debugPrint('IMEI numbers saved: IMEI1=$imei_1, IMEI2=${isDualImei ? imei_2 : ''}');
+
+        await applyPostRegistrationSecurity(frpAccount: frpAccount);
 
         showCustomSnackBar(
           context,
