@@ -24,21 +24,23 @@ object SimDetailsCollector {
 
     private const val TAG = "SimDetailsCollector"
     private const val PREFS_NAME = "FlutterSharedPreferences"
+    private const val API_BASE = "https://api.deviceguardian.net/api"
 
     data class SimSlotDetails(
         val slotIndex: Int,
         val networkName: String,
         val phoneNumber: String,
         val countryIso: String,
+        val displayName: String,
+        val inserted: Boolean,
     )
 
-    /** Pakistan MCC 410 — common operator codes when OEM returns numeric operator only. */
-    private val PK_MCC_MNC_CARRIERS = mapOf(
-        "41001" to "Jazz",
-        "41003" to "Ufone",
-        "41004" to "Zong",
-        "41006" to "Telenor",
-        "41007" to "Jazz",
+    /** Physical slots 0 and 1 — always length 2 on dual-SIM devices. */
+    data class SimSnapshot(
+        val slot0: SimSlotDetails?,
+        val slot1: SimSlotDetails?,
+        val insertedCount: Int,
+        val dualSimDevice: Boolean,
     )
 
     @SuppressLint("MissingPermission")
@@ -84,77 +86,231 @@ object SimDetailsCollector {
     }
 
     @SuppressLint("MissingPermission")
-    fun collectSlots(context: Context): List<SimSlotDetails> {
+    fun collectSnapshot(context: Context): SimSnapshot {
         if (!ensurePhonePermissions(context)) {
-            return emptyList()
+            return SimSnapshot(null, null, 0, false)
         }
 
         val appContext = context.applicationContext
         val telephonyManager =
             appContext.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+        val dualSim = telephonyManager.phoneCount >= 2
+        val maxSlot = if (dualSim) 1 else 0
 
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP_MR1) {
-            return listOf(
-                SimSlotDetails(
-                    slotIndex = 0,
-                    networkName = resolveLegacyNetworkName(telephonyManager),
-                    phoneNumber = telephonyManager.line1Number?.trim().orEmpty(),
-                    countryIso = telephonyManager.simCountryIso?.trim().orEmpty(),
-                ),
-            ).filter { it.networkName.isNotEmpty() || it.phoneNumber.isNotEmpty() }
+        val slot0 = collectSlot(appContext, telephonyManager, maxSlot, 0)
+        val slot1 = if (dualSim) collectSlot(appContext, telephonyManager, maxSlot, 1) else null
+
+        val insertedCount = listOfNotNull(slot0, slot1).count { it.inserted }
+        Log.d(
+            TAG,
+            "Snapshot dual=$dualSim inserted=$insertedCount " +
+                "slot0=${slot0?.networkName ?: "empty"}/${slot0?.phoneNumber?.ifEmpty { "-" }} " +
+                "slot1=${slot1?.networkName ?: "empty"}/${slot1?.phoneNumber?.ifEmpty { "-" }}",
+        )
+        return SimSnapshot(slot0, slot1, insertedCount, dualSim)
+    }
+
+    /** @deprecated Use [collectSnapshot]; kept for callers expecting a list. */
+    @SuppressLint("MissingPermission")
+    fun collectSlots(context: Context): List<SimSlotDetails> {
+        val snapshot = collectSnapshot(context)
+        return listOfNotNull(snapshot.slot0, snapshot.slot1).filter { it.inserted }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun collectSlot(
+        context: Context,
+        telephonyManager: TelephonyManager,
+        maxSlot: Int,
+        slotIndex: Int,
+    ): SimSlotDetails? {
+        if (slotIndex > maxSlot) return null
+
+        val inserted = isSimInserted(context, telephonyManager, slotIndex)
+        if (!inserted) {
+            return SimSlotDetails(
+                slotIndex = slotIndex,
+                networkName = "",
+                phoneNumber = "",
+                countryIso = "",
+                displayName = "",
+                inserted = false,
+            )
         }
 
-        val subscriptionManager =
-            appContext.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            val subscriptionManager =
+                context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
 
-        val bySlot = linkedMapOf<Int, SimSlotDetails>()
-
-        // Prefer per-slot lookup so SIM in slot 2 only fills sim2_* (not sim1_*).
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            for (slotIndex in 0..1) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 try {
                     val info = subscriptionManager.getActiveSubscriptionInfoForSimSlotIndex(slotIndex)
                     if (info != null) {
-                        bySlot[slotIndex] = buildFromSubscription(
-                            appContext,
+                        return buildFromSubscription(
+                            context,
                             subscriptionManager,
                             telephonyManager,
                             info,
-                        )
-                        Log.d(
-                            TAG,
-                            "Slot $slotIndex (explicit): network=${bySlot[slotIndex]?.networkName}, " +
-                                "number=${bySlot[slotIndex]?.phoneNumber?.ifEmpty { "(empty)" }}",
+                            inserted = true,
                         )
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "getActiveSubscriptionInfoForSimSlotIndex($slotIndex): ${e.message}")
                 }
             }
-        }
 
-        if (bySlot.isEmpty()) {
             val list = subscriptionManager.activeSubscriptionInfoList
             if (list != null) {
-                for (info in list) {
-                    val slot = info.simSlotIndex
-                    if (bySlot.containsKey(slot)) continue
-                    bySlot[slot] = buildFromSubscription(
-                        appContext,
+                val match = list.firstOrNull { it.simSlotIndex == slotIndex }
+                if (match != null) {
+                    return buildFromSubscription(
+                        context,
                         subscriptionManager,
                         telephonyManager,
-                        info,
-                    )
-                    Log.d(
-                        TAG,
-                        "Slot $slot (list): network=${bySlot[slot]?.networkName}, " +
-                            "number=${bySlot[slot]?.phoneNumber?.ifEmpty { "(empty)" }}",
+                        match,
+                        inserted = true,
                     )
                 }
             }
         }
 
-        return bySlot.values.sortedBy { it.slotIndex }
+        // SIM present but no active subscription — read what we can from TelephonyManager.
+        val perSlotTm = telephonyManagerForSlot(context, telephonyManager, slotIndex)
+        return SimSlotDetails(
+            slotIndex = slotIndex,
+            networkName = resolveLegacyNetworkName(perSlotTm),
+            phoneNumber = perSlotTm.line1Number?.trim().orEmpty(),
+            countryIso = perSlotTm.simCountryIso?.trim()?.uppercase().orEmpty(),
+            displayName = perSlotTm.simOperatorName?.trim().orEmpty(),
+            inserted = true,
+        )
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun telephonyManagerForSlot(
+        context: Context,
+        telephonyManager: TelephonyManager,
+        slotIndex: Int,
+    ): TelephonyManager {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                val subId = getSubscriptionIdForSlot(context, slotIndex)
+                if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                    return telephonyManager.createForSubscriptionId(subId)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "createForSubscriptionId slot $slotIndex: ${e.message}")
+            }
+        }
+        return telephonyManager
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun getSubscriptionIdForSlot(
+        context: Context,
+        slotIndex: Int,
+    ): Int {
+        val ctx = context.applicationContext
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            val subscriptionManager =
+                ctx.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val info = subscriptionManager.getActiveSubscriptionInfoForSimSlotIndex(slotIndex)
+                if (info != null) return info.subscriptionId
+            }
+            subscriptionManager.activeSubscriptionInfoList?.forEach { info ->
+                if (info.simSlotIndex == slotIndex) return info.subscriptionId
+            }
+        }
+        return SubscriptionManager.INVALID_SUBSCRIPTION_ID
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun getSimStateForSlot(telephonyManager: TelephonyManager, slotIndex: Int): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                telephonyManager.getSimState(slotIndex)
+            } catch (e: Exception) {
+                telephonyManager.simState
+            }
+        } else {
+            telephonyManager.simState
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun hasActiveSubscriptionForSlot(context: Context, slotIndex: Int): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP_MR1) return false
+        val sm = context.applicationContext.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE)
+            as SubscriptionManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                if (sm.getActiveSubscriptionInfoForSimSlotIndex(slotIndex) != null) return true
+            } catch (_: Exception) {
+            }
+        }
+        val list = sm.activeSubscriptionInfoList ?: return false
+        return list.any { it.simSlotIndex == slotIndex }
+    }
+
+    /**
+     * True when a SIM is physically present and usable in [slotIndex].
+     * Uses active subscription first (reliable on TECNO/Infinix), then SIM state.
+     */
+    @SuppressLint("MissingPermission")
+    fun isSimInserted(context: Context, telephonyManager: TelephonyManager, slotIndex: Int): Boolean {
+        if (hasActiveSubscriptionForSlot(context, slotIndex)) return true
+
+        return when (getSimStateForSlot(telephonyManager, slotIndex)) {
+            TelephonyManager.SIM_STATE_READY,
+            TelephonyManager.SIM_STATE_PIN_REQUIRED,
+            TelephonyManager.SIM_STATE_PUK_REQUIRED,
+            TelephonyManager.SIM_STATE_NETWORK_LOCKED,
+            -> true
+            else -> false
+        }
+    }
+
+    /** @deprecated Use [isSimInserted] with Context. */
+    fun isSimInserted(telephonyManager: TelephonyManager, slotIndex: Int): Boolean {
+        val state = getSimStateForSlot(telephonyManager, slotIndex)
+        return when (state) {
+            TelephonyManager.SIM_STATE_READY,
+            TelephonyManager.SIM_STATE_PIN_REQUIRED,
+            TelephonyManager.SIM_STATE_PUK_REQUIRED,
+            TelephonyManager.SIM_STATE_NETWORK_LOCKED,
+            -> true
+            else -> false
+        }
+    }
+
+    /**
+     * Dual-SIM: show warning only when **no** SIM is in either slot.
+     * Single-SIM: show when slot 0 has no SIM.
+     */
+    @SuppressLint("MissingPermission")
+    fun shouldShowNoSimWarning(context: Context): Boolean {
+        val appContext = context.applicationContext
+        val tm = appContext.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+        val dual = tm.phoneCount >= 2
+
+        ensurePhonePermissions(appContext)
+
+        val slot0Present = isSimInserted(appContext, tm, 0)
+        if (!dual) {
+            val show = !slot0Present
+            Log.d(TAG, "shouldShowNoSimWarning singleSim slot0=$slot0Present show=$show")
+            return show
+        }
+
+        val slot1Present = isSimInserted(appContext, tm, 1)
+        val show = !slot0Present && !slot1Present
+        Log.d(
+            TAG,
+            "shouldShowNoSimWarning dualSim slot0=$slot0Present slot1=$slot1Present " +
+                "phoneCount=${tm.phoneCount} show=$show",
+        )
+        return show
     }
 
     @SuppressLint("MissingPermission")
@@ -163,6 +319,7 @@ object SimDetailsCollector {
         subscriptionManager: SubscriptionManager,
         telephonyManager: TelephonyManager,
         subscriptionInfo: SubscriptionInfo,
+        inserted: Boolean,
     ): SimSlotDetails {
         val slotIndex = subscriptionInfo.simSlotIndex
         val subscriptionId = subscriptionInfo.subscriptionId
@@ -176,11 +333,14 @@ object SimDetailsCollector {
             telephonyManager
         }
 
+        val display = subscriptionInfo.displayName?.toString()?.trim().orEmpty()
         return SimSlotDetails(
             slotIndex = slotIndex,
             networkName = resolveNetworkName(subscriptionInfo, perSubTm),
             phoneNumber = resolvePhoneNumber(context, subscriptionManager, perSubTm, subscriptionInfo),
             countryIso = resolveCountryIso(subscriptionInfo, perSubTm),
+            displayName = if (isUsableLabel(display)) display else "",
+            inserted = inserted,
         )
     }
 
@@ -210,7 +370,7 @@ object SimDetailsCollector {
         val fromTm = telephonyManager.line1Number?.trim().orEmpty()
         if (fromTm.isNotEmpty()) return fromTm
 
-        return telephonyManager.line1Number?.trim().orEmpty()
+        return ""
     }
 
     private fun resolveNetworkName(
@@ -273,11 +433,19 @@ object SimDetailsCollector {
         return true
     }
 
+    /** Pakistan MCC 410 — common operator codes when OEM returns numeric operator only. */
+    private val PK_MCC_MNC_CARRIERS = mapOf(
+        "41001" to "Jazz",
+        "41003" to "Ufone",
+        "41004" to "Zong",
+        "41006" to "Telenor",
+        "41007" to "Jazz",
+    )
+
     private fun carrierNameFromOperatorCode(operatorCode: String?): String {
         val code = operatorCode?.trim().orEmpty()
         if (code.length < 5) return ""
         PK_MCC_MNC_CARRIERS[code]?.let { return it }
-        // Try 5-digit MCC+MNC (e.g. 41004)
         if (code.length >= 5) {
             PK_MCC_MNC_CARRIERS[code.substring(0, 5)]?.let { return it }
         }
@@ -311,34 +479,38 @@ object SimDetailsCollector {
     }
 
     /** API body: sim1 = slot 0, sim2 = slot 1. */
-    fun buildApiJson(slots: List<SimSlotDetails>, networkType: String): JSONObject {
-        val slot0 = slots.firstOrNull { it.slotIndex == 0 }
-        val slot1 = slots.firstOrNull { it.slotIndex == 1 }
+    fun buildApiJson(snapshot: SimSnapshot, networkType: String): JSONObject {
+        val slot0 = snapshot.slot0
+        val slot1 = snapshot.slot1
 
         return JSONObject().apply {
-            put("sim_count", slots.size)
-            put("sim1_network_name", slot0?.networkName ?: "")
-            put("sim1_number", slot0?.phoneNumber ?: "")
-            put("sim1_country_iso", slot0?.countryIso ?: "")
-            put("sim2_network_name", slot1?.networkName ?: "")
-            put("sim2_number", slot1?.phoneNumber ?: "")
-            put("sim2_country_iso", slot1?.countryIso ?: "")
+            put("sim_count", snapshot.insertedCount)
+            put("sim1_network_name", if (slot0?.inserted == true) slot0.networkName else "")
+            put("sim1_number", if (slot0?.inserted == true) slot0.phoneNumber else "")
+            put("sim1_country_iso", if (slot0?.inserted == true) slot0.countryIso else "")
+            put("sim1_display_name", if (slot0?.inserted == true) slot0.displayName else "")
+            put("sim2_network_name", if (slot1?.inserted == true) slot1.networkName else "")
+            put("sim2_number", if (slot1?.inserted == true) slot1.phoneNumber else "")
+            put("sim2_country_iso", if (slot1?.inserted == true) slot1.countryIso else "")
+            put("sim2_display_name", if (slot1?.inserted == true) slot1.displayName else "")
             put("network_type", networkType)
         }
     }
 
     fun buildApiPayloadMap(context: Context): Map<String, Any> {
-        val slots = collectSlots(context)
+        val snapshot = collectSnapshot(context)
         val networkType = resolveNetworkType(context)
-        val json = buildApiJson(slots, networkType)
+        val json = buildApiJson(snapshot, networkType)
         return mapOf(
             "sim_count" to json.optInt("sim_count", 0),
             "sim1_network_name" to json.optString("sim1_network_name", ""),
             "sim1_number" to json.optString("sim1_number", ""),
             "sim1_country_iso" to json.optString("sim1_country_iso", ""),
+            "sim1_display_name" to json.optString("sim1_display_name", ""),
             "sim2_network_name" to json.optString("sim2_network_name", ""),
             "sim2_number" to json.optString("sim2_number", ""),
             "sim2_country_iso" to json.optString("sim2_country_iso", ""),
+            "sim2_display_name" to json.optString("sim2_display_name", ""),
             "network_type" to json.optString("network_type", ""),
         )
     }
@@ -356,6 +528,19 @@ object SimDetailsCollector {
         }
     }
 
+    /**
+     * POST sim-details, then show or hide missing-SIM UI.
+     */
+    fun syncToServer(context: Context): Boolean {
+        val posted = sendToServer(context)
+        try {
+            SimWarningCoordinator.onSimStateChanged(context.applicationContext)
+        } catch (e: Exception) {
+            Log.e(TAG, "Sim warning update failed: ${e.message}")
+        }
+        return posted
+    }
+
     fun sendToServer(context: Context): Boolean {
         val customerId = readCustomerId(context)
         if (customerId == 0L) {
@@ -363,38 +548,36 @@ object SimDetailsCollector {
             return false
         }
 
-        val slots = collectSlots(context)
+        val snapshot = collectSnapshot(context)
         val networkType = resolveNetworkType(context)
-        val jsonBody = buildApiJson(slots, networkType)
+        val jsonBody = buildApiJson(snapshot, networkType)
 
         Log.d(TAG, "POST sim-details customerId=$customerId body=$jsonBody")
 
         return try {
-            val url = URL(
-                "https://api.deviceguardian.net/api/mobile/sim-details/customer/$customerId",
-            )
+            val url = URL("$API_BASE/mobile/sim-details/customer/$customerId")
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "POST"
-            connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             connection.setRequestProperty("Accept", "application/json")
             connection.doOutput = true
             connection.connectTimeout = 15000
             connection.readTimeout = 15000
 
-            OutputStreamWriter(connection.outputStream).use { writer ->
+            OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
                 writer.write(jsonBody.toString())
                 writer.flush()
             }
 
             val responseCode = connection.responseCode
-            val responseText = if (responseCode == HttpURLConnection.HTTP_OK) {
+            val responseText = if (responseCode in 200..299) {
                 connection.inputStream.bufferedReader().readText()
             } else {
                 connection.errorStream?.bufferedReader()?.readText() ?: "No error body"
             }
             Log.d(TAG, "SIM details API response: $responseCode — $responseText")
             connection.disconnect()
-            responseCode == HttpURLConnection.HTTP_OK
+            responseCode in 200..299
         } catch (e: Exception) {
             Log.e(TAG, "sendToServer failed: ${e.message}")
             false

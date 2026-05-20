@@ -82,7 +82,14 @@ class _SplashScreenState extends State<SplashScreen> {
       return;
     }
 
-    // Step 3: All good - Navigate to WelcomeScreen
+    // Step 3: Monitor SIM slots + sync details to server
+    try {
+      await KioskService.startSimMonitoring();
+    } catch (e) {
+      debugPrint('⚠️ startSimMonitoring: $e');
+    }
+
+    // Step 4: All good - Navigate to WelcomeScreen
     _navigateTo(const WelcomeScreen());
   }
 

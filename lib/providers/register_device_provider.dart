@@ -1125,9 +1125,11 @@ class RegisterDeviceProvider with ChangeNotifier{
     String? sim1NetworkName,
     String? sim1Number,
     String? sim1CountryIso,
+    String? sim1DisplayName,
     String? sim2NetworkName,
     String? sim2Number,
     String? sim2CountryIso,
+    String? sim2DisplayName,
     String? networkType,
   }) async {
     debugPrint('📱📱📱 updateDeviceSimDetailsApi CALLED 📱📱📱');
@@ -1150,9 +1152,11 @@ class RegisterDeviceProvider with ChangeNotifier{
         "sim1_network_name": sim1NetworkName ?? '',
         "sim1_number": sim1Number ?? '',
         "sim1_country_iso": sim1CountryIso ?? '',
+        "sim1_display_name": sim1DisplayName ?? '',
         "sim2_network_name": sim2NetworkName ?? '',
         "sim2_number": sim2Number ?? '',
         "sim2_country_iso": sim2CountryIso ?? '',
+        "sim2_display_name": sim2DisplayName ?? '',
         "network_type": networkType ?? '',
       };
       debugPrint('📱 Request body: $body');

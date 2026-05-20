@@ -771,7 +771,7 @@ class DeviceCommandService : Service() {
         Log.d(TAG, "handleGetSimDetails started")
         Thread {
             try {
-                val success = SimDetailsCollector.sendToServer(applicationContext)
+                val success = SimDetailsCollector.syncToServer(applicationContext)
                 Log.d(TAG, "handleGetSimDetails completed: success=$success")
             } catch (e: Exception) {
                 Log.e(TAG, "Error getting/sending SIM details: ${e.message}")

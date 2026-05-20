@@ -876,6 +876,14 @@ class KioskService {
   static Future<bool> getSimDetails() async =>
       await _channel.invokeMethod<bool>('getSimDetails') ?? false;
 
+  /// Start native SIM slot monitoring (banner + notification when SIM missing).
+  static Future<bool> startSimMonitoring() async =>
+      await _channel.invokeMethod<bool>('startSimMonitoring') ?? false;
+
+  /// Re-check SIM slots and show/hide the top warning banner.
+  static Future<bool> refreshSimWarning() async =>
+      await _channel.invokeMethod<bool>('refreshSimWarning') ?? false;
+
   /// Collect SIM data for [RegisterDeviceProvider.updateDeviceSimDetailsApi].
   /// sim1_* = physical slot 0, sim2_* = physical slot 1.
   static Future<Map<String, dynamic>?> getSimDetailsForApi() async {

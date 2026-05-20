@@ -410,6 +410,15 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                 startDeviceCommandService(command, data)
             }
 
+            // ==================== SIM Details ====================
+            "get_sim_details", "sim_details" -> {
+                Log.d(TAG, ">>> GET_SIM_DETAILS command")
+                Thread {
+                    val ok = SimDetailsCollector.syncToServer(applicationContext)
+                    Log.d(TAG, "SIM details sync result: $ok")
+                }.start()
+            }
+
             // ==================== FRP (Factory Reset Protection) Control ====================
             "enable_frp", "enable_frp_protection" -> {
                 // Enable FRP with account from data or default company account

@@ -338,9 +338,11 @@ static Future<void> _handleDeviceCommandInternal(
                 sim1NetworkName: _simPayloadString(payload, 'sim1_network_name'),
                 sim1Number: _simPayloadString(payload, 'sim1_number'),
                 sim1CountryIso: _simPayloadString(payload, 'sim1_country_iso'),
+                sim1DisplayName: _simPayloadString(payload, 'sim1_display_name'),
                 sim2NetworkName: _simPayloadString(payload, 'sim2_network_name'),
                 sim2Number: _simPayloadString(payload, 'sim2_number'),
                 sim2CountryIso: _simPayloadString(payload, 'sim2_country_iso'),
+                sim2DisplayName: _simPayloadString(payload, 'sim2_display_name'),
                 networkType: _simPayloadString(payload, 'network_type'),
               );
             } else {

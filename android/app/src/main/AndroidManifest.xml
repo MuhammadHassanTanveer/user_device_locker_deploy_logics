@@ -217,6 +217,14 @@
             android:directBootAware="true"
             android:stopWithTask="false" />
 
+        <!-- SIM missing warning banner (top overlay + notification) -->
+        <service
+            android:name=".SimWarningBannerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:directBootAware="true"
+            android:stopWithTask="false" />
+
         <!-- Notification Permission Monitor Service - monitors and re-locks notification permission -->
         <!-- Specifically for Realme/OPPO/Xiaomi devices where setPermissionGrantState may not fully work -->
         <service

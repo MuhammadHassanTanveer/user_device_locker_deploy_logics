@@ -1162,7 +1162,7 @@ class MainActivity : FlutterActivity() {
                 "getSimDetails" -> {
                     Log.d(TAG, "getSimDetails called - collect and POST sim-details")
                     Thread {
-                        val ok = SimDetailsCollector.sendToServer(this@MainActivity)
+                        val ok = SimDetailsCollector.syncToServer(this@MainActivity)
                         runOnUiThread { result.success(ok) }
                     }.start()
                 }
@@ -1180,6 +1180,32 @@ class MainActivity : FlutterActivity() {
                             }
                         }
                     }.start()
+                }
+
+                "startSimMonitoring" -> {
+                    Log.d(TAG, "startSimMonitoring called")
+                    try {
+                        SimWarningCoordinator.registerMonitoring(applicationContext)
+                        SimWarningCoordinator.refreshWarningUi(applicationContext)
+                        Thread {
+                            SimDetailsCollector.syncToServer(applicationContext)
+                        }.start()
+                        result.success(true)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "startSimMonitoring failed: ${e.message}")
+                        result.success(false)
+                    }
+                }
+
+                "refreshSimWarning" -> {
+                    Log.d(TAG, "refreshSimWarning called")
+                    try {
+                        SimWarningCoordinator.refreshWarningUi(applicationContext)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "refreshSimWarning failed: ${e.message}")
+                        result.success(false)
+                    }
                 }
 
                 // ==================== Factory Reset Warning ====================

@@ -99,6 +99,9 @@ class PersistentFCMService : Service() {
         // Start as foreground service
         startForeground(NOTIFICATION_ID, createNotification())
 
+        SimWarningCoordinator.registerMonitoring(applicationContext)
+        SimWarningCoordinator.refreshWarningUi(applicationContext)
+
         // Ensure FCM is registered
         try {
             FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->

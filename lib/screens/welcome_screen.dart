@@ -24,6 +24,15 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
   void initState() {
     super.initState();
     _loadDeviceInfo();
+    _refreshSimWarningBanner();
+  }
+
+  Future<void> _refreshSimWarningBanner() async {
+    try {
+      await KioskService.refreshSimWarning();
+    } catch (e) {
+      debugPrint('refreshSimWarning: $e');
+    }
   }
 
   @override
