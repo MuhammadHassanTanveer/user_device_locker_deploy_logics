@@ -48,7 +48,7 @@ class SimWarningBannerService : Service() {
 
     private var windowManager: WindowManager? = null
     private var bannerView: View? = null
-    private var message: String = SimWarningCoordinator.MESSAGE_URDU
+    private var message: String = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -60,7 +60,8 @@ class SimWarningBannerService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        message = intent?.getStringExtra("message") ?: SimWarningCoordinator.MESSAGE_URDU
+        message = intent?.getStringExtra("message")
+            ?: SimWarningCoordinator.buildNoSimWarningMessage(this)
         showBanner()
         return START_STICKY
     }
