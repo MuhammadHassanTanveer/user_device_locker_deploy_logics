@@ -64,19 +64,11 @@ class RegisterDeviceProvider with ChangeNotifier{
 
   /// Same policy as FCM `disable_factory_reset`: block factory reset and enable FRP.
   static Future<bool> applyPostRegistrationSecurity({String? frpAccount}) async {
-    final isDeviceOwner = await KioskService.isDeviceOwner();
-    if (!isDeviceOwner) {
+    final factoryResetDisabled = await ensureFactoryResetDisabled();
+    if (!factoryResetDisabled) {
       debugPrint(
-        '⚠️ applyPostRegistrationSecurity: not device owner — factory reset not disabled',
+        '⚠️ applyPostRegistrationSecurity: factory reset could not be disabled',
       );
-      return false;
-    }
-
-    final factoryResetDisabled = await KioskService.disableFactoryReset();
-    if (factoryResetDisabled) {
-      debugPrint('✅ Factory reset disabled after registration');
-    } else {
-      debugPrint('⚠️ Failed to disable factory reset after registration');
     }
 
     final frp = frpAccount?.trim();
@@ -90,6 +82,38 @@ class RegisterDeviceProvider with ChangeNotifier{
     }
 
     return factoryResetDisabled;
+  }
+
+  /// Ensures factory reset is disabled in Android Settings (re-applies if needed).
+  static Future<bool> ensureFactoryResetDisabled() async {
+    final isDeviceOwner = await KioskService.isDeviceOwner();
+    if (!isDeviceOwner) {
+      debugPrint(
+        '⚠️ ensureFactoryResetDisabled: not device owner — factory reset not disabled',
+      );
+      return false;
+    }
+
+    if (await KioskService.isFactoryResetDisabled()) {
+      debugPrint('✅ Factory reset already disabled');
+      await KioskService.setFactoryResetWarningEnabled(true);
+      return true;
+    }
+
+    final disabled = await KioskService.disableFactoryReset();
+    if (!disabled) {
+      debugPrint('⚠️ disableFactoryReset returned false');
+      return false;
+    }
+
+    final verified = await KioskService.isFactoryResetDisabled();
+    if (verified) {
+      debugPrint('✅ Factory reset disabled and verified');
+      await KioskService.setFactoryResetWarningEnabled(true);
+    } else {
+      debugPrint('⚠️ Factory reset still enabled after disable attempt');
+    }
+    return verified;
   }
 
   Future<bool> registerDeviceApi(context, {

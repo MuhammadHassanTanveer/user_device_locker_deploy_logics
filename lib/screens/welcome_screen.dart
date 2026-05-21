@@ -17,6 +17,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
 
   CustomerProfile? _customer;
   bool _isDeviceOwner = false;
+  bool _isFactoryResetDisabled = false;
   bool _hasCalledLockCodeApi = false;
   bool _isFinishing = false;
 
@@ -53,11 +54,15 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
   Future<void> _loadDeviceInfo() async {
     final customer = await RegisterDeviceProvider.getCustomerProfile();
     final isDeviceOwner = await KioskService.isDeviceOwner();
+    final isFactoryResetDisabled = isDeviceOwner
+        ? await KioskService.isFactoryResetDisabled()
+        : false;
 
     if (mounted) {
       setState(() {
         _customer = customer;
         _isDeviceOwner = isDeviceOwner;
+        _isFactoryResetDisabled = isFactoryResetDisabled;
       });
     }
   }
@@ -89,6 +94,29 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
     setState(() => _isFinishing = true);
 
     try {
+      final factoryResetDisabled =
+          await RegisterDeviceProvider.ensureFactoryResetDisabled();
+
+      if (!factoryResetDisabled) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Could not disable factory reset in Settings. '
+                'Ensure Device Owner is active, then try again.',
+              ),
+              backgroundColor: Colors.orange,
+            ),
+          );
+          setState(() => _isFinishing = false);
+        }
+        return;
+      }
+
+      if (mounted) {
+        setState(() => _isFactoryResetDisabled = true);
+      }
+
       final hidden = await KioskService.hideSelf();
       if (!hidden) {
         if (mounted) {
@@ -229,8 +257,10 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
                       _buildInfoRow(
                         icon: Icons.lock,
                         label: 'Factory Reset',
-                        value: _isDeviceOwner ? 'Disabled' : 'Enabled',
-                        valueColor: _isDeviceOwner ? Colors.green : Colors.orange,
+                        value: !_isDeviceOwner
+                            ? 'Not protected'
+                            : (_isFactoryResetDisabled ? 'Disabled' : 'Enabled'),
+                        valueColor: _isFactoryResetDisabled ? Colors.green : Colors.orange,
                       ),
                     ],
                   ),

@@ -79,6 +79,10 @@ class KioskService {
   static Future<bool> enableFactoryReset() async =>
       await _channel.invokeMethod<bool>('enableFactoryReset') ?? false;
 
+  /// Returns true when factory reset is blocked in Android Settings (DISALLOW_FACTORY_RESET).
+  static Future<bool> isFactoryResetDisabled() async =>
+      await _channel.invokeMethod<bool>('isFactoryResetDisabled') ?? false;
+
   // ==================== Safe Mode Control ====================
 
   /// Disable safe mode boot

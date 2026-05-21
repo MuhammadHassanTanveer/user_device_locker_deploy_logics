@@ -317,6 +317,10 @@ class MainActivity : FlutterActivity() {
                     result.success(dpmHelper.enableFactoryReset())
                 }
 
+                "isFactoryResetDisabled" -> {
+                    result.success(dpmHelper.isFactoryResetDisabled())
+                }
+
                 // ==================== Safe Mode Control ====================
 
                 "disableSafeMode" -> {
@@ -1242,6 +1246,11 @@ class MainActivity : FlutterActivity() {
                     val enabled = call.argument<Boolean>("enabled") ?: true
                     Log.d(TAG, "setFactoryResetWarningEnabled: $enabled")
                     try {
+                        // Persist even when accessibility service is not connected yet
+                        getSharedPreferences("factory_reset_warning_prefs", MODE_PRIVATE)
+                            .edit()
+                            .putBoolean("warning_enabled", enabled)
+                            .apply()
                         MyAccessibilityService.instance?.setWarningEnabled(enabled)
                         result.success(true)
                     } catch (e: Exception) {

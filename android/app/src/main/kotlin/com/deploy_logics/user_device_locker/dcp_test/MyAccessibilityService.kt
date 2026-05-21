@@ -241,9 +241,10 @@ class MyAccessibilityService : AccessibilityService() {
             return
         }
         
-        // Only process window state changes to reduce event spam
-        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && 
-            eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+        // Process window navigation and taps on factory-reset menu items
+        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+            eventType != AccessibilityEvent.TYPE_VIEW_CLICKED) {
             return
         }
         
@@ -274,6 +275,20 @@ class MyAccessibilityService : AccessibilityService() {
         }
         
         currentSettingsPackage = packageName
+
+        // User tapped a factory-reset-related control while reset is blocked by DPM
+        if (eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            val clickText = getEventText(event)
+            if (clickText.isNotEmpty() &&
+                isFactoryResetRelated(className, clickText) &&
+                (dpmHelper?.isFactoryResetDisabled() == true)
+            ) {
+                Log.d(TAG, "🚨 Factory Reset control CLICKED (reset disabled)")
+                wasOverlayDismissedByUser = false
+                showOverlayDirectly()
+            }
+            return
+        }
         
         // Get text from window for detection
         val windowText = getWindowText().lowercase()
@@ -352,6 +367,16 @@ class MyAccessibilityService : AccessibilityService() {
         }
     }
     
+    /**
+     * Text from the clicked/focused accessibility node (label + content description).
+     */
+    private fun getEventText(event: AccessibilityEvent): String {
+        val sb = StringBuilder()
+        event.text?.forEach { sb.append(it).append(' ') }
+        event.contentDescription?.let { sb.append(it) }
+        return sb.toString().lowercase()
+    }
+
     /**
      * Get all text from the current window using rootInActiveWindow
      */
@@ -1016,7 +1041,8 @@ class MyAccessibilityService : AccessibilityService() {
         
         val info = AccessibilityServiceInfo().apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                        AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                        AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                        AccessibilityEvent.TYPE_VIEW_CLICKED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                    AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
