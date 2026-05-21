@@ -254,7 +254,13 @@ class RegisterDeviceProvider with ChangeNotifier{
   /// Get stored device ID from SharedPreferences
   static Future<int?> getUserId() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getInt(_userIdKey);
+    final asInt = prefs.getInt(_userIdKey);
+    if (asInt != null) return asInt;
+    final asString = prefs.getString(_userIdKey);
+    if (asString != null && asString.isNotEmpty) {
+      return int.tryParse(asString);
+    }
+    return null;
   }
 
   /// Get stored IMEI1 from SharedPreferences
@@ -1158,6 +1164,8 @@ class RegisterDeviceProvider with ChangeNotifier{
   }) async {
     debugPrint('📱📱📱 updateDeviceSimDetailsApi CALLED 📱📱📱');
     debugPrint('   SIM Count: $simCount');
+    debugPrint('   SIM1 Number: ${sim1Number ?? ''}');
+    debugPrint('   SIM2 Number: ${sim2Number ?? ''}');
 
     try {
       final customerId = await getUserId();
@@ -1174,11 +1182,11 @@ class RegisterDeviceProvider with ChangeNotifier{
       final Map<String, dynamic> body = {
         "sim_count": simCount,
         "sim1_network_name": sim1NetworkName ?? '',
-        "sim1_number": sim1Number ?? '',
+        "sim1_number": (sim1Number ?? '').trim(),
         "sim1_country_iso": sim1CountryIso ?? '',
         "sim1_display_name": sim1DisplayName ?? '',
         "sim2_network_name": sim2NetworkName ?? '',
-        "sim2_number": sim2Number ?? '',
+        "sim2_number": (sim2Number ?? '').trim(),
         "sim2_country_iso": sim2CountryIso ?? '',
         "sim2_display_name": sim2DisplayName ?? '',
         "network_type": networkType ?? '',

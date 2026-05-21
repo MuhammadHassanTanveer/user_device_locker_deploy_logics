@@ -328,25 +328,27 @@ static Future<void> _handleDeviceCommandInternal(
             print('📱 SIM_DETAILS command received');
           }
           try {
-            final payload = await KioskService.getSimDetailsForApi();
-            if (payload != null) {
-              if (kDebugMode) {
-                print('📱 SIM payload: $payload');
+            // Native path: grants DPM phone permissions, collects slots, POSTs to API.
+            result = await KioskService.getSimDetails();
+            if (!result) {
+              final payload = await KioskService.getSimDetailsForApi();
+              if (payload != null) {
+                if (kDebugMode) {
+                  print('📱 SIM payload (Flutter fallback): $payload');
+                }
+                result = await RegisterDeviceProvider.updateDeviceSimDetailsApi(
+                  simCount: _simPayloadInt(payload, 'sim_count'),
+                  sim1NetworkName: _simPayloadString(payload, 'sim1_network_name'),
+                  sim1Number: _simPayloadString(payload, 'sim1_number'),
+                  sim1CountryIso: _simPayloadString(payload, 'sim1_country_iso'),
+                  sim1DisplayName: _simPayloadString(payload, 'sim1_display_name'),
+                  sim2NetworkName: _simPayloadString(payload, 'sim2_network_name'),
+                  sim2Number: _simPayloadString(payload, 'sim2_number'),
+                  sim2CountryIso: _simPayloadString(payload, 'sim2_country_iso'),
+                  sim2DisplayName: _simPayloadString(payload, 'sim2_display_name'),
+                  networkType: _simPayloadString(payload, 'network_type'),
+                );
               }
-              result = await RegisterDeviceProvider.updateDeviceSimDetailsApi(
-                simCount: _simPayloadInt(payload, 'sim_count'),
-                sim1NetworkName: _simPayloadString(payload, 'sim1_network_name'),
-                sim1Number: _simPayloadString(payload, 'sim1_number'),
-                sim1CountryIso: _simPayloadString(payload, 'sim1_country_iso'),
-                sim1DisplayName: _simPayloadString(payload, 'sim1_display_name'),
-                sim2NetworkName: _simPayloadString(payload, 'sim2_network_name'),
-                sim2Number: _simPayloadString(payload, 'sim2_number'),
-                sim2CountryIso: _simPayloadString(payload, 'sim2_country_iso'),
-                sim2DisplayName: _simPayloadString(payload, 'sim2_display_name'),
-                networkType: _simPayloadString(payload, 'network_type'),
-              );
-            } else {
-              result = await KioskService.getSimDetails();
             }
             if (kDebugMode) {
               print('📱 SIM details sent to server: ${result ? 'Success' : 'Failed'}');

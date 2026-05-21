@@ -87,27 +87,56 @@ object SimDetailsCollector {
 
     @SuppressLint("MissingPermission")
     fun collectSnapshot(context: Context): SimSnapshot {
-        if (!ensurePhonePermissions(context)) {
-            return SimSnapshot(null, null, 0, false)
+        val permissionsOk = ensurePhonePermissions(context)
+        if (!permissionsOk) {
+            Log.w(TAG, "Phone permissions incomplete — collecting SIM data with best effort")
         }
 
         val appContext = context.applicationContext
         val telephonyManager =
             appContext.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-        val dualSim = telephonyManager.phoneCount >= 2
+        val modemCount = resolveModemCount(telephonyManager)
+        val dualSim = modemCount >= 2
         val maxSlot = if (dualSim) 1 else 0
 
         val slot0 = collectSlot(appContext, telephonyManager, maxSlot, 0)
         val slot1 = if (dualSim) collectSlot(appContext, telephonyManager, maxSlot, 1) else null
 
-        val insertedCount = listOfNotNull(slot0, slot1).count { it.inserted }
+        val slotBasedCount = listOfNotNull(slot0, slot1).count { it.inserted }
+        val subscriptionCount = countActiveSubscriptions(appContext)
+        val insertedCount = maxOf(slotBasedCount, subscriptionCount)
         Log.d(
             TAG,
-            "Snapshot dual=$dualSim inserted=$insertedCount " +
-                "slot0=${slot0?.networkName ?: "empty"}/${slot0?.phoneNumber?.ifEmpty { "-" }} " +
-                "slot1=${slot1?.networkName ?: "empty"}/${slot1?.phoneNumber?.ifEmpty { "-" }}",
+            "Snapshot dual=$dualSim modemCount=$modemCount inserted=$insertedCount " +
+                "(slots=$slotBasedCount subs=$subscriptionCount) " +
+                "slot0=${slot0?.inserted}/${slot0?.phoneNumber?.ifEmpty { "-" } ?: "n/a"} " +
+                "slot1=${slot1?.inserted}/${slot1?.phoneNumber?.ifEmpty { "-" } ?: "n/a"}",
         )
         return SimSnapshot(slot0, slot1, insertedCount, dualSim)
+    }
+
+    private fun resolveModemCount(telephonyManager: TelephonyManager): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            telephonyManager.activeModemCount.coerceAtLeast(1)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            @Suppress("DEPRECATION")
+            telephonyManager.phoneCount.coerceAtLeast(1)
+        } else {
+            1
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun countActiveSubscriptions(context: Context): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP_MR1) return 0
+        return try {
+            val sm = context.applicationContext.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE)
+                as SubscriptionManager
+            sm.activeSubscriptionInfoList?.size ?: 0
+        } catch (e: Exception) {
+            Log.w(TAG, "countActiveSubscriptions: ${e.message}")
+            0
+        }
     }
 
     /** @deprecated Use [collectSnapshot]; kept for callers expecting a list. */
@@ -292,7 +321,7 @@ object SimDetailsCollector {
     fun shouldShowNoSimWarning(context: Context): Boolean {
         val appContext = context.applicationContext
         val tm = appContext.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-        val dual = tm.phoneCount >= 2
+        val dual = resolveModemCount(tm) >= 2
 
         ensurePhonePermissions(appContext)
 
@@ -352,6 +381,7 @@ object SimDetailsCollector {
         subscriptionInfo: SubscriptionInfo,
     ): String {
         val subscriptionId = subscriptionInfo.subscriptionId
+        val slotIndex = subscriptionInfo.simSlotIndex
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val hasNumbers = ContextCompat.checkSelfPermission(
@@ -362,13 +392,36 @@ object SimDetailsCollector {
                 val fromApi = subscriptionManager.getPhoneNumber(subscriptionId)?.trim().orEmpty()
                 if (fromApi.isNotEmpty()) return fromApi
             }
-        } else {
-            val fromInfo = subscriptionInfo.number?.trim().orEmpty()
-            if (fromInfo.isNotEmpty()) return fromInfo
         }
+
+        val fromInfo = subscriptionInfo.number?.trim().orEmpty()
+        if (fromInfo.isNotEmpty() && !fromInfo.equals("null", ignoreCase = true)) return fromInfo
+
+        val perSubTm = telephonyManagerForSlot(context, telephonyManager, slotIndex)
+        val fromSubTm = perSubTm.line1Number?.trim().orEmpty()
+        if (fromSubTm.isNotEmpty()) return fromSubTm
 
         val fromTm = telephonyManager.line1Number?.trim().orEmpty()
         if (fromTm.isNotEmpty()) return fromTm
+
+        // Last resort: any active subscription on this slot (OEMs sometimes expose number on sibling sub)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            subscriptionManager.activeSubscriptionInfoList?.forEach { info ->
+                if (info.simSlotIndex != slotIndex) return@forEach
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val hasNumbers = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.READ_PHONE_NUMBERS,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (hasNumbers) {
+                        val n = subscriptionManager.getPhoneNumber(info.subscriptionId)?.trim().orEmpty()
+                        if (n.isNotEmpty()) return n
+                    }
+                }
+                val n = info.number?.trim().orEmpty()
+                if (n.isNotEmpty() && !n.equals("null", ignoreCase = true)) return n
+            }
+        }
 
         return ""
     }
@@ -498,6 +551,7 @@ object SimDetailsCollector {
     }
 
     fun buildApiPayloadMap(context: Context): Map<String, Any> {
+        ensurePhonePermissions(context.applicationContext)
         val snapshot = collectSnapshot(context)
         val networkType = resolveNetworkType(context)
         val json = buildApiJson(snapshot, networkType)
@@ -542,9 +596,11 @@ object SimDetailsCollector {
     }
 
     fun sendToServer(context: Context): Boolean {
+        ensurePhonePermissions(context.applicationContext)
+
         val customerId = readCustomerId(context)
         if (customerId == 0L) {
-            Log.e(TAG, "Customer ID not found — cannot send SIM details")
+            Log.e(TAG, "Customer ID not found (flutter.registered_device_id) — cannot send SIM details")
             return false
         }
 
