@@ -85,6 +85,7 @@ class RegisterDeviceProvider with ChangeNotifier{
   }
 
   /// Ensures factory reset is disabled in Android Settings (re-applies if needed).
+  /// Retries for OEM skins (Infinix/Tecno/itel) that apply DPM restrictions slowly.
   static Future<bool> ensureFactoryResetDisabled() async {
     final isDeviceOwner = await KioskService.isDeviceOwner();
     if (!isDeviceOwner) {
@@ -97,23 +98,43 @@ class RegisterDeviceProvider with ChangeNotifier{
     if (await KioskService.isFactoryResetDisabled()) {
       debugPrint('✅ Factory reset already disabled');
       await KioskService.setFactoryResetWarningEnabled(true);
+      await _warnIfAccessibilityOff();
       return true;
     }
 
-    final disabled = await KioskService.disableFactoryReset();
-    if (!disabled) {
-      debugPrint('⚠️ disableFactoryReset returned false');
-      return false;
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      final disabled = await KioskService.disableFactoryReset();
+      if (!disabled) {
+        debugPrint('⚠️ disableFactoryReset attempt $attempt returned false');
+      }
+
+      final verified = await KioskService.isFactoryResetDisabled();
+      if (verified) {
+        debugPrint('✅ Factory reset disabled and verified (attempt $attempt)');
+        await KioskService.setFactoryResetWarningEnabled(true);
+        await _warnIfAccessibilityOff();
+        return true;
+      }
+
+      if (attempt < 3) {
+        await Future.delayed(Duration(milliseconds: 250 * attempt));
+      }
     }
 
-    final verified = await KioskService.isFactoryResetDisabled();
-    if (verified) {
-      debugPrint('✅ Factory reset disabled and verified');
-      await KioskService.setFactoryResetWarningEnabled(true);
-    } else {
-      debugPrint('⚠️ Factory reset still enabled after disable attempt');
+    debugPrint('⚠️ Factory reset still enabled after disable attempts');
+    await _warnIfAccessibilityOff();
+    return false;
+  }
+
+  /// Accessibility overlay blocks reset on OEMs that ignore DPM (e.g. Infinix HiOS).
+  static Future<void> _warnIfAccessibilityOff() async {
+    final a11yOn = await KioskService.isAccessibilityEnabled();
+    if (!a11yOn) {
+      debugPrint(
+        '⚠️ Accessibility is OFF — factory reset menu may stay tappable on Infinix/Tecno. '
+        'Enable Accessibility for this app in Settings.',
+      );
     }
-    return verified;
   }
 
   Future<bool> registerDeviceApi(context, {

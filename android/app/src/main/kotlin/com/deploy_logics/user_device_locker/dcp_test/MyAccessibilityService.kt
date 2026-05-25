@@ -59,7 +59,14 @@ class MyAccessibilityService : AccessibilityService() {
             "com.oneplus.settings",
             "com.huawei.settings",
             "com.asus.settings",
-            "com.google.android.apps.wellbeing"
+            "com.google.android.apps.wellbeing",
+            // Transsion: Infinix, Tecno, itel (Hot 60 Pro, etc.)
+            "com.transsion.settings",
+            "com.transsion.systemsettings",
+            "com.transsion.hiosettings",
+            "com.infinix.settings",
+            "com.tecno.settings",
+            "com.itel.settings"
         )
         
         // Keywords for notification settings pages (including Realme/OPPO/ColorOS)
@@ -139,12 +146,29 @@ class MyAccessibilityService : AccessibilityService() {
             "all data will be erased",
             "erase all user data",
             "reset options",
+            "reset option",
+            "erase everything",
+            "erase all data (factory reset)",
+            "reset phone",
+            "reset all settings",
+            "clear all data",
+            "delete all data and settings",
+            "restore to factory",
+            "system reset",
+            "phone reset",
+            "wipe data",
             "masterclear",
             "factoryreset",
             "wipedataactivity",
+            // Transsion / HiOS / XOS wording
+            "factory data reset",
+            "restore factory settings",
+            "clear phone data",
             "فیکٹری ری سیٹ",
             "ڈیٹا صاف کریں",
-            "تمام ڈیٹا مٹائیں"
+            "تمام ڈیٹا مٹائیں",
+            "فون ری سیٹ",
+            "سب ڈیٹا مٹائیں"
         )
         
         // Specific keywords that strongly indicate factory reset (higher priority)
@@ -163,6 +187,7 @@ class MyAccessibilityService : AccessibilityService() {
             "MasterClear",
             "MasterClearConfirm",
             "FactoryReset",
+            "FactoryResetConfirm",
             "FactoryResetActivity",
             "ResetPhone",
             "ResetDevice",
@@ -171,7 +196,44 @@ class MyAccessibilityService : AccessibilityService() {
             "ResetSettings",
             "BackupReset",
             "ResetDashboard",
-            "ResetOptions"
+            "ResetOptions",
+            "MainClear",
+            "SystemReset",
+            "TranssionReset",
+            "RecoverySystem",
+            "master_clear_disallowed"
+        )
+
+        // View IDs in Settings layouts (AOSP + OEM skins)
+        private val FACTORY_RESET_VIEW_ID_KEYWORDS = listOf(
+            "reset",
+            "factory",
+            "master_clear",
+            "main_clear",
+            "erase",
+            "wipe",
+            "clear_data",
+            "factoryreset"
+        )
+
+        // Clickable control labels that start the reset flow (menu rows + buttons)
+        private val FACTORY_RESET_BUTTON_KEYWORDS = listOf(
+            "factory reset",
+            "factory data reset",
+            "erase all data",
+            "erase everything",
+            "reset phone",
+            "reset device",
+            "reset options",
+            "master clear",
+            "wipe data",
+            "clear all data",
+            "delete all data",
+            "restore factory",
+            "فیکٹری",
+            "ری سیٹ",
+            "ڈیٹا صاف",
+            "مٹائیں"
         )
         
         var instance: MyAccessibilityService? = null
@@ -280,12 +342,11 @@ class MyAccessibilityService : AccessibilityService() {
         if (eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
             val clickText = getEventText(event)
             if (clickText.isNotEmpty() &&
-                isFactoryResetRelated(className, clickText) &&
+                isFactoryResetControlText(clickText) &&
                 (dpmHelper?.isFactoryResetDisabled() == true)
             ) {
-                Log.d(TAG, "🚨 Factory Reset control CLICKED (reset disabled)")
-                wasOverlayDismissedByUser = false
-                showOverlayDirectly()
+                Log.d(TAG, "🚨 Factory Reset control CLICKED (reset disabled): $clickText")
+                interceptFactoryResetAction()
             }
             return
         }
@@ -336,10 +397,11 @@ class MyAccessibilityService : AccessibilityService() {
         }
         
         // Check if this is a factory reset related page
-        if (isFactoryResetRelated(className, windowText)) {
+        val windowIds = getWindowViewIds()
+        if (isFactoryResetRelated(className, windowText, windowIds)) {
             isOnFactoryResetScreen = true
             lastFactoryResetDetectedTime = System.currentTimeMillis()
-            Log.d(TAG, "🚨 Factory Reset page DETECTED!")
+            Log.d(TAG, "🚨 Factory Reset page DETECTED! pkg=$packageName class=$className")
             
             // Reset the dismissed flag ONLY if user has navigated away and come back
             // (i.e., this is a new navigation to factory reset)
@@ -356,6 +418,9 @@ class MyAccessibilityService : AccessibilityService() {
             if (!wasOverlayDismissedByUser) {
                 showOverlayDirectly()
             }
+
+            // HiOS/XOS often paints reset UI after content events — re-scan on a delay
+            scheduleFactoryResetPageProtection()
         } else {
             // User is in settings but NOT on factory reset screen
             // Reset the dismissed flag so overlay will show again when they navigate to factory reset
@@ -420,9 +485,14 @@ class MyAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun isFactoryResetRelated(className: String, text: String): Boolean {
+    private fun isFactoryResetRelated(
+        className: String,
+        text: String,
+        viewIds: String = ""
+    ): Boolean {
         val classNameLower = className.lowercase()
         val textLower = text.lowercase()
+        val viewIdsLower = viewIds.lowercase()
         
         // Check strong keywords first
         for (keyword in STRONG_FACTORY_RESET_KEYWORDS) {
@@ -439,6 +509,13 @@ class MyAccessibilityService : AccessibilityService() {
                 return true
             }
         }
+
+        for (idKeyword in FACTORY_RESET_VIEW_ID_KEYWORDS) {
+            if (viewIdsLower.contains(idKeyword)) {
+                Log.d(TAG, "✅ Matched view id keyword: $idKeyword")
+                return true
+            }
+        }
         
         // Check regular keywords
         for (keyword in FACTORY_RESET_KEYWORDS) {
@@ -449,6 +526,74 @@ class MyAccessibilityService : AccessibilityService() {
         }
         
         return false
+    }
+
+    private fun isFactoryResetControlText(text: String): Boolean {
+        val lower = text.lowercase()
+        if (isFactoryResetRelated("", lower)) return true
+        return FACTORY_RESET_BUTTON_KEYWORDS.any { lower.contains(it) }
+    }
+
+    /**
+     * Block factory reset UI on OEMs that keep the menu item enabled (e.g. Infinix HiOS).
+     * Navigates back from the reset screen and shows the legal warning overlay.
+     */
+    private fun interceptFactoryResetAction() {
+        if (dpmHelper?.isFactoryResetDisabled() != true) return
+
+        wasOverlayDismissedByUser = false
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        mainHandler.postDelayed({
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            showOverlayDirectly()
+        }, 120)
+        mainHandler.postDelayed({ showOverlayDirectly() }, 400)
+    }
+
+    private var factoryResetScanGeneration = 0
+
+    /** Re-check reset UI after Transsion/HiOS finishes loading the page. */
+    private fun scheduleFactoryResetPageProtection() {
+        if (dpmHelper?.isFactoryResetDisabled() != true) return
+        val generation = ++factoryResetScanGeneration
+        val delays = longArrayOf(300, 800, 1500, 2500)
+        for (delay in delays) {
+            mainHandler.postDelayed({
+                if (generation != factoryResetScanGeneration) return@postDelayed
+                if (!isOnFactoryResetScreen) return@postDelayed
+                if (dpmHelper?.isFactoryResetDisabled() != true) return@postDelayed
+                if (!wasOverlayDismissedByUser && !isOverlayShowing && !isOverlayPending) {
+                    showOverlayDirectly()
+                }
+            }, delay)
+        }
+    }
+
+    private fun getWindowViewIds(): String {
+        val sb = StringBuilder()
+        try {
+            val rootNode = rootInActiveWindow
+            if (rootNode != null) {
+                extractViewIdsFromNode(rootNode, sb)
+                rootNode.recycle()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting window view ids: ${e.message}")
+        }
+        return sb.toString()
+    }
+
+    private fun extractViewIdsFromNode(node: AccessibilityNodeInfo?, sb: StringBuilder, depth: Int = 0) {
+        if (node == null || depth > 12) return
+        try {
+            node.viewIdResourceName?.let { sb.append(it).append(' ') }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                extractViewIdsFromNode(child, sb, depth + 1)
+                child.recycle()
+            }
+        } catch (_: Exception) {
+        }
     }
 
     /**

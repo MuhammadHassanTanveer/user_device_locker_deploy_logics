@@ -183,18 +183,58 @@ class DevicePolicyManagerHelper(private val context: Context) {
     }
 
     // Common user restrictions
+    /** OEM packages known to expose factory-reset paths that ignore DPM on some devices. */
+    private val factoryResetBypassPackages = listOf(
+        "com.transsion.agingfunction", // Infinix/Tecno/itel (CVE-2024-10576)
+    )
+
+    /**
+     * Hide/block Transsion and other OEM factory-reset bypass apps (device owner only).
+     */
+    fun blockFactoryResetBypassPackages(): Boolean {
+        if (!isDeviceOwner()) return false
+        var anyHidden = false
+        for (pkg in factoryResetBypassPackages) {
+            try {
+                if (dpm.setApplicationHidden(adminComponent, pkg, true)) {
+                    Log.d(TAG, "Hidden factory-reset bypass package: $pkg")
+                    anyHidden = true
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not hide $pkg: ${e.message}")
+            }
+        }
+        return anyHidden
+    }
+
     /**
      * Disable factory reset AND auto-enable FRP protection.
-     * This ensures that even if user hard resets, they need the FRP account.
+     * Retries restriction apply for OEM skins (e.g. Infinix HiOS) that lag applying DPM state.
      */
     fun disableFactoryReset(): Boolean {
-        val result = addUserRestriction(UserManager.DISALLOW_FACTORY_RESET)
-        if (result) {
-            // Auto-enable FRP when factory reset is disabled
+        var applied = false
+        repeat(3) { attempt ->
+            if (addUserRestriction(UserManager.DISALLOW_FACTORY_RESET)) {
+                applied = true
+            }
+            if (isFactoryResetDisabled()) {
+                Log.d(TAG, "DISALLOW_FACTORY_RESET active (attempt ${attempt + 1})")
+                return@repeat
+            }
+        }
+
+        blockFactoryResetBypassPackages()
+
+        if (applied || isFactoryResetDisabled()) {
             val frpResult = enableFrpProtection("ghazanfar@tech4uk.uk")
             Log.d(TAG, "🔒 Factory reset disabled, FRP auto-enabled: $frpResult")
         }
-        return result
+
+        val verified = isFactoryResetDisabled()
+        if (!verified) {
+            Log.e(TAG, "❌ DISALLOW_FACTORY_RESET not verified after disableFactoryReset()")
+        }
+        return verified
     }
 
     /**
@@ -202,6 +242,13 @@ class DevicePolicyManagerHelper(private val context: Context) {
      * This allows user to reset without needing FRP account.
      */
     fun enableFactoryReset(): Boolean {
+        for (pkg in factoryResetBypassPackages) {
+            try {
+                dpm.setApplicationHidden(adminComponent, pkg, false)
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not unhide $pkg: ${e.message}")
+            }
+        }
         val result = clearUserRestriction(UserManager.DISALLOW_FACTORY_RESET)
         if (result) {
             // Auto-disable FRP when factory reset is enabled

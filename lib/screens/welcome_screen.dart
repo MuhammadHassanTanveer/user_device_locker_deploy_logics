@@ -113,6 +113,20 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
         return;
       }
 
+      final accessibilityOn = await KioskService.isAccessibilityEnabled();
+      if (!accessibilityOn && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Enable Accessibility for this app so factory reset stays blocked '
+              'on Infinix/Tecno and other custom Android skins.',
+            ),
+            backgroundColor: Colors.orange,
+            duration: Duration(seconds: 6),
+          ),
+        );
+      }
+
       if (mounted) {
         setState(() => _isFactoryResetDisabled = true);
       }
